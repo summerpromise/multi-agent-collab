@@ -1,16 +1,16 @@
 /**
- * 多智能体协作系统 v5.1 — Black & Gold Edition
+ * 多智能体协作系统 v5.2 — Black & Gold Edition
  *
- * 0 常量 · SVG图标 · Function Calling 工具定义
+ * 0 常量 · SVG图标 · FC工具定义
  * 1 场景模板
  * 2 状态管理 & 配置持久层
- * 3 游戏引擎
- * 4 LLM 层（FC + ReAct 双模式）
+ * 3 游戏引擎（数据驱动战斗）
+ * 4 LLM 层（FC + ReAct + AbortController + 友好错误 + JSON修复）
  * 5 Agent 执行引擎
  * 6 协调层（游戏循环）
  * 7 评估系统
- * 8 UI（全屏仪表盘 + 浮动HUD + 酒馆聊天注入）
- * 9 启动
+ * 8 UI（全屏仪表盘 + 浮动HUD + 酒馆聊天注入 + 消息通道选择 + HUD持久化）
+ * 9 启动（MutationObserver）
  */
 (function () {
     'use strict';
@@ -19,7 +19,7 @@
     //  PART 0 — 常量 · SVG图标 · FC工具定义
     // ══════════════════════════════════════════════════════════════
 
-    const MODULE = 'multi_agent_collab', VERSION = '5.1.0', SAVE_KEY = 'mac_game_save';
+    const MODULE = 'multi_agent_collab', VERSION = '5.2.0', SAVE_KEY = 'mac_game_save', HUD_KEY = 'mac_hud_state';
 
     const IC = {
         logo: '<svg viewBox="0 0 28 28" fill="none" stroke="currentColor" stroke-width="1.2"><polygon points="14,3 25,9 25,19 14,25 3,19 3,9"/><circle cx="14" cy="14" r="2.5" fill="currentColor" stroke="none" opacity=".5"/><circle cx="14" cy="6" r="1.5" fill="currentColor" stroke="none"/><circle cx="22" cy="11" r="1.5" fill="currentColor" stroke="none"/><circle cx="22" cy="17" r="1.5" fill="currentColor" stroke="none"/><circle cx="14" cy="22" r="1.5" fill="currentColor" stroke="none"/><circle cx="6" cy="17" r="1.5" fill="currentColor" stroke="none"/><circle cx="6" cy="11" r="1.5" fill="currentColor" stroke="none"/></svg>',
@@ -54,21 +54,31 @@
     const TL = { move:'移动',search:'搜索',pickup_item:'拾取',attack:'攻击',speak:'说话',narrate:'叙述',inspect:'查看',use_item:'使用',rest:'休息',complete_turn:'结束',interact:'交流',narrate_event:'GM叙述',spawn_enemy:'GM生成',heal_character:'GM治疗',damage_character:'GM伤害' };
     const TC = { move:'#c9a24d',search:'#b08ee6',pickup_item:'#7ec89a',attack:'#d47070',speak:'#dbb866',narrate:'#a09486',inspect:'#8ab4f8',use_item:'#5ec6c6',rest:'#8b8cf8',complete_turn:'#6a6258',interact:'#dbb866',narrate_event:'#b08ee6',spawn_enemy:'#d47070',heal_character:'#7ec89a',damage_character:'#d47070' };
 
+    const ERR_HINTS = {
+        401: '认证失败：请检查 API Key 是否正确。',
+        403: '权限不足：当前 Key 无权访问此模型。',
+        404: '接口不存在：请检查 API 地址是否正确。',
+        429: '请求过多：已触发速率限制，请稍后再试。',
+        500: '服务器内部错误，请稍后重试。',
+        502: '网关错误：API 服务可能暂时不可用。',
+        503: '服务不可用：API 正在维护中。',
+    };
+
     // ══════════════════════════════════════════════════════════════
-    //  PART 1 — 场景模板（与 v5.0 相同）
+    //  PART 1 — 场景模板
     // ══════════════════════════════════════════════════════════════
     const SCENARIOS = {
         rpg: {
             name:'地牢冒险',icon:'⚔️',desc:'经典RPG冒险，探索地牢击败恶魔',
             world:{locations:{village:{name:'村庄',desc:'宁静的小村庄，有旅馆和补给。',conn:['forest','dungeon_entrance'],items:['healing_potion','bread'],enemies:[]},forest:{name:'迷雾森林',desc:'茂密森林，草药与陷阱并存。',conn:['village','cave'],items:['herbs','arrows'],enemies:['wolf','goblin']},dungeon_entrance:{name:'地牢入口',desc:'阴冷入口，骷髅把守。',conn:['village','dungeon_hall'],items:[],enemies:['skeleton']},dungeon_hall:{name:'地牢大厅',desc:'终点大厅，魔剑与恶魔在此。',conn:['dungeon_entrance'],items:['magic_sword','gold_coin'],enemies:['demon','vampire']},cave:{name:'神秘山洞',desc:'法力充沛，魔法威力翻倍。',conn:['forest'],items:['magic_crystal','ancient_scroll'],enemies:['cave_troll']}},items:{healing_potion:{name:'治疗药水',effect:'heal',val:30},bread:{name:'面包',effect:'heal',val:10},herbs:{name:'草药',effect:'heal',val:15},arrows:{name:'箭矢',effect:'weapon',val:5},magic_sword:{name:'魔法剑',effect:'weapon',val:25},gold_coin:{name:'金币',effect:'currency',val:10},magic_crystal:{name:'魔法水晶',effect:'magic',val:20},ancient_scroll:{name:'古老卷轴',effect:'magic',val:30}},enemies:{wolf:{name:'灰狼',hp:30,maxHp:30,dmg:15,reward:5},goblin:{name:'哥布林',hp:25,maxHp:25,dmg:10,reward:8},skeleton:{name:'骷髅',hp:40,maxHp:40,dmg:18,reward:12},demon:{name:'恶魔',hp:60,maxHp:60,dmg:25,reward:20},vampire:{name:'吸血鬼',hp:50,maxHp:50,dmg:22,reward:18},cave_troll:{name:'山洞巨魔',hp:70,maxHp:70,dmg:30,reward:25}}},
-            agents:[{id:'warrior',name:'战士阿强',icon:'⚔️',role:'战士',hp:100,maxHp:100,location:'village',inventory:['bread'],gold:10,priority:1,prompt:'你是战士阿强，勇猛善战。目标：探索地牢、击败恶魔。攻击30，持魔法剑+25，减伤5。'},{id:'mage',name:'法师小慧',icon:'🔮',role:'法师',hp:70,maxHp:70,location:'village',inventory:['ancient_scroll'],gold:15,priority:2,prompt:'你是法师小慧，擅长搜索与魔法攻击。目标：收集魔法材料，协助击败敌人。魔攻20，山洞内+20。'}],
+            agents:[{id:'warrior',name:'战士阿强',icon:'⚔️',role:'战士',hp:100,maxHp:100,atk:30,def:5,location:'village',inventory:['bread'],gold:10,priority:1,prompt:'你是战士阿强，勇猛善战。目标：探索地牢、击败恶魔。',bonuses:{magic_sword:25,cave:0}},{id:'mage',name:'法师小慧',icon:'🔮',role:'法师',hp:70,maxHp:70,atk:20,def:0,location:'village',inventory:['ancient_scroll'],gold:15,priority:2,prompt:'你是法师小慧，擅长搜索与魔法攻击。目标：收集魔法材料，协助击败敌人。',bonuses:{magic_sword:0,cave:20}}],
             enemyHome:{wolf:'forest',goblin:'forest',skeleton:'dungeon_entrance',cave_troll:'cave'},
             checkGoal(a,W){if(a.location==='dungeon_hall'&&!(W.locations.dungeon_hall?.enemies||[]).length)return{done:true,reason:'地牢大厅已清空，任务完成！'};if(a.hp<=0)return{done:true,reason:'HP归零'};return{done:false}},
         },
         lostcity: {
             name:'失落之城',icon:'🏛️',desc:'探索远古遗迹，击败巨龙夺取宝藏',
             world:{locations:{ruins_gate:{name:'废墟大门',desc:'残破的巨型石门。',conn:['shadow_hall','watchtower'],items:['torch','ancient_map'],enemies:['stone_golem']},shadow_hall:{name:'暗影长廊',desc:'幽暗的走廊。',conn:['ruins_gate','trap_room','treasure_room'],items:['rope'],enemies:['shadow_bat']},trap_room:{name:'机关密室',desc:'布满陷阱。',conn:['shadow_hall'],items:['gem'],enemies:['mech_guard']},treasure_room:{name:'宝藏室',desc:'金光闪闪的宝藏室。',conn:['shadow_hall','dragon_lair'],items:['life_spring','dragon_gem'],enemies:[]},dragon_lair:{name:'龙之巢穴',desc:'炙热的巢穴。',conn:['treasure_room'],items:['dragon_scale'],enemies:['ancient_dragon']},watchtower:{name:'瞭望塔',desc:'可俯瞰全城遗迹。',conn:['ruins_gate'],items:['eagle_eye'],enemies:[]}},items:{torch:{name:'火炬',effect:'weapon',val:5},ancient_map:{name:'古代地图',effect:'info',val:0},rope:{name:'绳索',effect:'tool',val:0},gem:{name:'宝石',effect:'currency',val:20},life_spring:{name:'生命源泉',effect:'heal',val:50},dragon_gem:{name:'龙之宝石',effect:'magic',val:40},dragon_scale:{name:'龙鳞甲',effect:'armor',val:15},eagle_eye:{name:'鹰眼望远镜',effect:'info',val:0}},enemies:{stone_golem:{name:'石像怪',hp:50,maxHp:50,dmg:20,reward:15},shadow_bat:{name:'暗影蝙蝠',hp:20,maxHp:20,dmg:10,reward:5},mech_guard:{name:'机械守卫',hp:60,maxHp:60,dmg:25,reward:20},ancient_dragon:{name:'远古巨龙',hp:120,maxHp:120,dmg:40,reward:60}}},
-            agents:[{id:'thief',name:'盗贼小李',icon:'🗡️',role:'盗贼',hp:80,maxHp:80,location:'ruins_gate',inventory:['rope'],gold:5,priority:1,prompt:'你是盗贼小李，身手敏捷。目标：探索遗迹、协助击败巨龙。攻击25+偷袭15。'},{id:'scholar',name:'学者老王',icon:'📖',role:'学者',hp:60,maxHp:60,location:'ruins_gate',inventory:['ancient_map'],gold:20,priority:2,prompt:'你是学者老王，博学多才。目标：解读古文、支援战斗。攻击15。'}],
+            agents:[{id:'thief',name:'盗贼小李',icon:'🗡️',role:'盗贼',hp:80,maxHp:80,atk:25,def:0,location:'ruins_gate',inventory:['rope'],gold:5,priority:1,prompt:'你是盗贼小李，身手敏捷。目标：探索遗迹、协助击败巨龙。',bonuses:{sneak:15}},{id:'scholar',name:'学者老王',icon:'📖',role:'学者',hp:60,maxHp:60,atk:15,def:0,location:'ruins_gate',inventory:['ancient_map'],gold:20,priority:2,prompt:'你是学者老王，博学多才。目标：解读古文、支援战斗。',bonuses:{}}],
             enemyHome:{stone_golem:'ruins_gate',shadow_bat:'shadow_hall',mech_guard:'trap_room'},
             checkGoal(a,W){if(a.location==='dragon_lair'&&!(W.locations.dragon_lair?.enemies||[]).length)return{done:true,reason:'远古巨龙已被击败！'};if(a.hp<=0)return{done:true,reason:'HP归零'};return{done:false}},
         },
@@ -80,9 +90,34 @@
     // ══════════════════════════════════════════════════════════════
     let G={running:false,paused:false,stopReq:false,round:0,curIdx:0,agents:[],userAgent:null,world:null,inited:false,msgQueue:[],actionsHistory:[],waitingForUser:false,userActionResolve:null,currentPage:'dashboard',gmEnabled:true};
     let LOG=[], METRICS={llmCalls:0,toolCalls:0,fcCalls:0,textCalls:0,turns:0,rounds:0,errors:0,totalResponseMs:0,successes:0,failures:0};
+    let activeAbort = null;
 
-    function addLog(m,l='info'){const t=new Date().toLocaleTimeString('zh-CN',{hour12:false});LOG.push({ts:t,level:l,msg:String(m)});if(LOG.length>500)LOG.splice(0,100);renderLogs();}
-    function cfg(){const{extensionSettings:e}=SillyTavern.getContext();if(!e[MODULE])e[MODULE]={apiUrl:'',apiKey:'',apiModel:'gpt-4o-mini',maxRounds:10,stepDelay:1000,maxSteps:5,llmTimeout:60000,worldInfo:'',worldInfoSelected:[],scenario:'rpg',useFunctionCalling:true,gmEnabled:true,userName:'玩家',userIcon:'👤',agents:null,promptTemplates:null};const s=e[MODULE];if(!s.scenario)s.scenario='rpg';if(s.useFunctionCalling===undefined)s.useFunctionCalling=true;if(s.gmEnabled===undefined)s.gmEnabled=true;if(!s.maxSteps)s.maxSteps=5;if(!s.stepDelay)s.stepDelay=1000;if(!s.llmTimeout)s.llmTimeout=60000;if(!s.userName)s.userName='玩家';if(!s.userIcon)s.userIcon='👤';const sc=SCENARIOS[s.scenario]||SCENARIOS.rpg;if(!s.agents)s.agents=JSON.parse(JSON.stringify(sc.agents));if(!s.promptTemplates)s.promptTemplates={...DEFAULT_PROMPTS};return s;}
+    let logTimer = null;
+    function addLog(m,l='info'){
+        const t=new Date().toLocaleTimeString('zh-CN',{hour12:false});
+        LOG.push({ts:t,level:l,msg:String(m)});
+        if(LOG.length>500)LOG.splice(0,100);
+        if(!logTimer) logTimer = setTimeout(()=>{logTimer=null;renderLogs();}, 150);
+    }
+
+    function cfg(){
+        const{extensionSettings:e}=SillyTavern.getContext();
+        if(!e[MODULE])e[MODULE]={apiUrl:'',apiKey:'',apiModel:'gpt-4o-mini',maxRounds:10,stepDelay:1000,maxSteps:5,llmTimeout:60000,worldInfo:'',worldInfoSelected:[],scenario:'rpg',useFunctionCalling:true,gmEnabled:true,userName:'玩家',userIcon:'👤',agents:null,promptTemplates:null,msgChannel:'both'};
+        const s=e[MODULE];
+        if(!s.scenario)s.scenario='rpg';
+        if(s.useFunctionCalling===undefined)s.useFunctionCalling=true;
+        if(s.gmEnabled===undefined)s.gmEnabled=true;
+        if(!s.maxSteps)s.maxSteps=5;
+        if(!s.stepDelay)s.stepDelay=1000;
+        if(!s.llmTimeout)s.llmTimeout=60000;
+        if(!s.userName)s.userName='玩家';
+        if(!s.userIcon)s.userIcon='👤';
+        if(!s.msgChannel)s.msgChannel='both';
+        const sc=SCENARIOS[s.scenario]||SCENARIOS.rpg;
+        if(!s.agents)s.agents=JSON.parse(JSON.stringify(sc.agents));
+        if(!s.promptTemplates)s.promptTemplates={...DEFAULT_PROMPTS};
+        return s;
+    }
     function pt(k){return(cfg().promptTemplates||{})[k]??(DEFAULT_PROMPTS[k]??'');}
     function saveCfg(){SillyTavern.getContext().saveSettingsDebounced();}
     function esc(s){return String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
@@ -90,7 +125,13 @@
     function sleep(ms){return new Promise(r=>setTimeout(r,ms));}
     function waitResume(){return new Promise(r=>{const id=setInterval(()=>{if(!G.paused||!G.running){clearInterval(id);r();}},200);});}
     function getScenario(){return SCENARIOS[cfg().scenario]||SCENARIOS.rpg;}
-    function getWorldTpl(){const t=cfg().promptTemplates||{};try{const p=JSON.parse(t.worldTpl||'{}');if(p.locations&&p.items&&p.enemies)return p;}catch(_){}return JSON.parse(JSON.stringify(getScenario().world));}
+
+    function getWorldTpl(){
+        const t=cfg().promptTemplates||{};
+        try{const p=JSON.parse(t.worldTpl||'{}');if(p.locations&&p.items&&p.enemies)return p;}catch(_){}
+        return JSON.parse(JSON.stringify(getScenario().world));
+    }
+
     async function getSTWorldInfoNames(){try{const{getRequestHeaders:h}=SillyTavern.getContext();const r=await fetch('/api/settings/get',{method:'POST',headers:h(),body:JSON.stringify({})});if(!r.ok)throw new Error(r.status);return(await r.json()).world_names||[];}catch(e){addLog(`WI列表失败:${e.message}`,'warn');return[];}}
     async function loadSTWorldInfoFile(n){if(!n?.trim())return null;try{const{getRequestHeaders:h}=SillyTavern.getContext();const r=await fetch('/api/worldinfo/get',{method:'POST',headers:h(),body:JSON.stringify({name:n.trim()})});if(!r.ok)throw new Error(r.status);const d=await r.json();const entries=d.entries||d;return(typeof entries==='object'?Object.values(entries):[]).map(e=>e.content||'').filter(Boolean).join('\n');}catch(_){return null;}}
     function saveGame(slot){if(!G.world)return;localStorage.setItem(`${SAVE_KEY}_${slot}`,JSON.stringify({round:G.round,agents:G.agents,userAgent:G.userAgent,world:G.world,metrics:{...METRICS},ts:new Date().toLocaleString('zh-CN')}));addLog(`存档→槽位${slot}`);postSystemMsg(`💾 已存档（槽位${slot}）`);updateSaveInfo();}
@@ -98,14 +139,68 @@
     function getSaveInfo(i){const r=localStorage.getItem(`${SAVE_KEY}_${i}`);if(!r)return'空';try{const d=JSON.parse(r);return`第${d.round}轮 ${d.ts||''}`;}catch(_){return'损坏';}}
     function updateSaveInfo(){[1,2,3].forEach(i=>{const e=document.getElementById(`mac-si-${i}`);if(e)e.textContent=getSaveInfo(i);});}
 
+    function saveHudState(patch){
+        try{const cur=JSON.parse(localStorage.getItem(HUD_KEY)||'{}');Object.assign(cur,patch);localStorage.setItem(HUD_KEY,JSON.stringify(cur));}catch(_){}
+    }
+    function loadHudState(){try{return JSON.parse(localStorage.getItem(HUD_KEY)||'{}');}catch(_){return{};}}
+
     // ══════════════════════════════════════════════════════════════
-    //  PART 3 — 游戏引擎
+    //  PART 3 — 游戏引擎（数据驱动战斗）
     // ══════════════════════════════════════════════════════════════
-    function resetGame(){const s=cfg(),sc=getScenario();G.world=JSON.parse(JSON.stringify(sc.world));G.agents=s.agents.map(a=>({...JSON.parse(JSON.stringify(a)),hp:a.maxHp||100,maxHp:a.maxHp||100,location:a.location||Object.keys(sc.world.locations)[0],inventory:[...(a.inventory||[])],gold:a.gold||0}));G.userAgent={id:'user',name:s.userName,icon:s.userIcon,role:'主角',hp:100,maxHp:100,location:Object.keys(sc.world.locations)[0],inventory:[Object.keys(sc.world.items)[0]],gold:20};G.round=0;G.curIdx=0;G.actionsHistory=[];G.running=false;G.paused=false;G.stopReq=false;G.inited=true;G.waitingForUser=false;G.userActionResolve=null;G.gmEnabled=s.gmEnabled;}
+    function resetGame(){
+        const s=cfg();
+        const worldData = getWorldTpl();
+        G.world=JSON.parse(JSON.stringify(worldData));
+        G.agents=s.agents.map(a=>{
+            const base=JSON.parse(JSON.stringify(a));
+            return{...base,hp:base.maxHp||100,maxHp:base.maxHp||100,atk:base.atk||20,def:base.def||0,bonuses:base.bonuses||{},location:base.location||Object.keys(worldData.locations)[0],inventory:[...(base.inventory||[])],gold:base.gold||0};
+        });
+        G.userAgent={id:'user',name:s.userName,icon:s.userIcon,role:'主角',hp:100,maxHp:100,atk:20,def:0,bonuses:{},location:Object.keys(worldData.locations)[0],inventory:[Object.keys(worldData.items)[0]],gold:20};
+        G.round=0;G.curIdx=0;G.actionsHistory=[];G.running=false;G.paused=false;G.stopReq=false;G.inited=true;G.waitingForUser=false;G.userActionResolve=null;G.gmEnabled=s.gmEnabled;
+    }
+
     function resolveId(W,type,name){if(!name||!W)return null;const n=String(name).trim().toLowerCase();const maps={location:W.locations,item:W.items,enemy:W.enemies};const m=maps[type];if(m)for(const[id,o]of Object.entries(m))if(id===n||(o.name&&o.name.toLowerCase().includes(n)))return id;if(type==='agent')for(const a of[...(G.userAgent?[G.userAgent]:[]),...G.agents])if(a.id===n||(a.name&&a.name.toLowerCase().includes(n)))return a.id;return null;}
     function resolveParams(W,tool,params){const p={...params};if(tool==='move'&&p.destination)p.destination=resolveId(W,'location',p.destination)||p.destination;if(tool==='attack'&&p.target)p.target=resolveId(W,'enemy',p.target)||resolveId(W,'agent',p.target)||p.target;if(['pickup_item','pickup','take'].includes(tool)&&p.target)p.target=resolveId(W,'item',p.target)||p.target;if(tool==='use_item'&&p.item)p.item=resolveId(W,'item',p.item)||p.item;if(['speak','interact'].includes(tool)){if(p.to)p.to=resolveId(W,'agent',p.to)||p.to;if(p.agent)p.agent=resolveId(W,'agent',p.agent)||p.agent;}if(tool==='inspect'&&p.target)p.target=resolveId(W,'item',p.target)||resolveId(W,'location',p.target)||resolveId(W,'enemy',p.target)||p.target;return p;}
 
-    function executeTool(agent,tool,params){const W=G.world,loc=W.locations[agent.location];switch(tool){case'move':{let d=params.destination;if(d&&!W.locations[d])d=resolveId(W,'location',d)||d;if(!W.locations[d])return`未知地点"${params.destination}"。可前往: ${loc.conn.map(c=>`${W.locations[c].name}(${c})`).join(', ')}`;if(!loc.conn.includes(d))return`不能从【${loc.name}】到【${W.locations[d].name}】`;agent.location=d;const nl=W.locations[d];let r=`移动至【${nl.name}】。${nl.desc}`;if(nl.enemies.length)r+=` ⚠️ 遭遇: ${nl.enemies.map(e=>W.enemies[e]?.name||e).join('、')}！`;if(nl.items.length)r+=` 💎 地面: ${nl.items.map(i=>W.items[i]?.name||i).join('、')}`;return r;}case'search':{if(!loc.items.length)return`在【${loc.name}】没找到物品。`;const id=loc.items.shift();agent.inventory.push(id);return`发现【${W.items[id]?.name||id}】！`;}case'pickup_item':case'pickup':case'take':{let t=params.target||params.item;if(t&&!W.items[t])t=resolveId(W,'item',t)||t;if(!t||!W.items[t])return'无效物品。';const idx=loc.items.indexOf(t);if(idx===-1)return`地面没有"${t}"。`;loc.items.splice(idx,1);agent.inventory.push(t);return`拾取【${W.items[t].name}】！`;}case'attack':{let t=params.target;if(t&&!loc.enemies.includes(t))t=resolveId(W,'enemy',t)||t;if(loc.enemies.includes(t)){const en=W.enemies[t];let dmg=agent.role==='战士'?30:agent.role==='法师'?20:agent.role==='盗贼'?25:20;if(agent.inventory.includes('magic_sword'))dmg+=25;if(agent.role==='法师'&&agent.location==='cave')dmg+=20;if(agent.role==='盗贼')dmg+=15;en.hp-=dmg;if(en.hp<=0){loc.enemies=loc.enemies.filter(e=>e!==t);agent.gold+=en.reward;W.enemies[t].hp=en.maxHp;METRICS.successes++;return`对【${en.name}】造成${dmg}伤害，击败！+${en.reward}金币 💰${agent.gold}`;}const taken=Math.max(0,en.dmg-(agent.role==='战士'?5:0));agent.hp=Math.max(0,agent.hp-taken);W.enemies[t].hp=en.hp;return`对【${en.name}】造成${dmg}伤害(HP:${en.hp})。反击${taken}伤害，HP:${agent.hp}/${agent.maxHp}`;}const all=[...(G.userAgent?[G.userAgent]:[]),...G.agents];const tgt=all.find(a=>a&&a.hp>0&&a.location===agent.location&&a.id!==agent.id&&(a.id===t||a.name===t));if(tgt){const dmg=agent.role==='战士'?25:20;tgt.hp=Math.max(0,tgt.hp-dmg);broadcastEvent(agent,tgt.id,`（${agent.name}攻击了你，${dmg}伤害）`);return`对【${tgt.name}】造成${dmg}伤害。HP:${tgt.hp}/${tgt.maxHp}`;}return`没有"${params.target}"。`;}case'interact':case'speak':{const all=[...(G.userAgent?[G.userAgent]:[]),...G.agents];const who=params.agent||params.to;let tgt=all.find(a=>a&&(a.id===who||a.name===who));if(!tgt&&who)tgt=all.find(a=>a&&resolveId(null,'agent',who)===a.id);if(!tgt)return`找不到"${who}"。`;const msg=params.message||params.text||'';if(msg)broadcastEvent(agent,tgt.id,msg);return`对${tgt.icon}${tgt.name}说："${msg}"`;}case'narrate':return params.text?`【${agent.name}】${params.text}`:'（无叙述）';case'inspect':{let t=params.target;if(t&&!W.items[t]&&!W.locations[t]&&!W.enemies[t])t=resolveId(W,'item',t)||resolveId(W,'location',t)||resolveId(W,'enemy',t)||t;if(W.items[t])return`【${W.items[t].name}】: ${W.items[t].effect},值=${W.items[t].val}`;if(W.locations[t])return`【${W.locations[t].name}】: ${W.locations[t].desc}`;if(W.enemies[t])return`【${W.enemies[t].name}】: HP=${W.enemies[t].hp}/${W.enemies[t].maxHp}`;return`"${t}"无详细信息。`;}case'use_item':{let iid=params.item;if(iid&&!agent.inventory.includes(iid))iid=resolveId(W,'item',iid)||iid;if(!agent.inventory.includes(iid))return`背包没有"${iid}"。`;const item=W.items[iid];if(!item)return'无效物品。';if(item.effect==='heal'){const h=Math.min(item.val,agent.maxHp-agent.hp);agent.hp+=h;agent.inventory=agent.inventory.filter(i=>i!==iid);return`使用【${item.name}】，+${h}HP (${agent.hp}/${agent.maxHp})`;}return`使用【${item.name}】`;}case'rest':{const h=Math.min(20,agent.maxHp-agent.hp);agent.hp+=h;return`休息，+${h}HP (${agent.hp}/${agent.maxHp})`;}case'complete_turn':return`结束回合。${params.summary||''}`;default:{const u=String(tool).toLowerCase();if(['insult','curse','greet','say','talk','yell'].some(k=>u.includes(k)))return`【${agent.name}】${params.message||params.text||tool}`;if(['go','walk','run','enter','flee'].some(k=>u.includes(k))&&(params.destination||params.target))return executeTool(agent,'move',{destination:params.destination||params.target});if(['hit','fight','strike','slash'].some(k=>u.includes(k))&&params.target)return executeTool(agent,'attack',{target:params.target});return`【${agent.name}】${params.text||params.message||tool}`;}}
+    function calcDamage(agent){
+        let dmg = agent.atk || 20;
+        const bon = agent.bonuses || {};
+        for(const[key,val] of Object.entries(bon)){
+            if(agent.inventory.includes(key)) dmg += val;
+            if(agent.location === key) dmg += val;
+            if(key === 'sneak') dmg += val;
+        }
+        return dmg;
+    }
+
+    function executeTool(agent,tool,params){
+        const W=G.world,loc=W.locations[agent.location];
+        switch(tool){
+        case'move':{let d=params.destination;if(d&&!W.locations[d])d=resolveId(W,'location',d)||d;if(!W.locations[d])return`未知地点"${params.destination}"。可前往: ${loc.conn.map(c=>`${W.locations[c].name}(${c})`).join(', ')}`;if(!loc.conn.includes(d))return`不能从【${loc.name}】到【${W.locations[d].name}】`;agent.location=d;const nl=W.locations[d];let r=`移动至【${nl.name}】。${nl.desc}`;if(nl.enemies.length)r+=` ⚠️ 遭遇: ${nl.enemies.map(e=>W.enemies[e]?.name||e).join('、')}！`;if(nl.items.length)r+=` 💎 地面: ${nl.items.map(i=>W.items[i]?.name||i).join('、')}`;return r;}
+        case'search':{if(!loc.items.length)return`在【${loc.name}】没找到物品。`;const id=loc.items.shift();agent.inventory.push(id);return`发现【${W.items[id]?.name||id}】！`;}
+        case'pickup_item':case'pickup':case'take':{let t=params.target||params.item;if(t&&!W.items[t])t=resolveId(W,'item',t)||t;if(!t||!W.items[t])return'无效物品。';const idx=loc.items.indexOf(t);if(idx===-1)return`地面没有"${t}"。`;loc.items.splice(idx,1);agent.inventory.push(t);return`拾取【${W.items[t].name}】！`;}
+        case'attack':{
+            let t=params.target;if(t&&!loc.enemies.includes(t))t=resolveId(W,'enemy',t)||t;
+            if(loc.enemies.includes(t)){
+                const en=W.enemies[t];
+                const dmg=calcDamage(agent);
+                en.hp-=dmg;
+                if(en.hp<=0){loc.enemies=loc.enemies.filter(e=>e!==t);agent.gold+=en.reward;W.enemies[t].hp=en.maxHp;METRICS.successes++;return`对【${en.name}】造成${dmg}伤害，击败！+${en.reward}金币 💰${agent.gold}`;}
+                const taken=Math.max(0,en.dmg-(agent.def||0));agent.hp=Math.max(0,agent.hp-taken);W.enemies[t].hp=en.hp;
+                return`对【${en.name}】造成${dmg}伤害(HP:${en.hp})。反击${taken}伤害，HP:${agent.hp}/${agent.maxHp}`;
+            }
+            const all=[...(G.userAgent?[G.userAgent]:[]),...G.agents];
+            const tgt=all.find(a=>a&&a.hp>0&&a.location===agent.location&&a.id!==agent.id&&(a.id===t||a.name===t));
+            if(tgt){const dmg=calcDamage(agent);tgt.hp=Math.max(0,tgt.hp-dmg);broadcastEvent(agent,tgt.id,`（${agent.name}攻击了你，${dmg}伤害）`);return`对【${tgt.name}】造成${dmg}伤害。HP:${tgt.hp}/${tgt.maxHp}`;}
+            return`没有"${params.target}"。`;
+        }
+        case'interact':case'speak':{const all=[...(G.userAgent?[G.userAgent]:[]),...G.agents];const who=params.agent||params.to;let tgt=all.find(a=>a&&(a.id===who||a.name===who));if(!tgt&&who)tgt=all.find(a=>a&&resolveId(null,'agent',who)===a.id);if(!tgt)return`找不到"${who}"。`;const msg=params.message||params.text||'';if(msg)broadcastEvent(agent,tgt.id,msg);return`对${tgt.icon}${tgt.name}说："${msg}"`;}
+        case'narrate':return params.text?`【${agent.name}】${params.text}`:'（无叙述）';
+        case'inspect':{let t=params.target;if(t&&!W.items[t]&&!W.locations[t]&&!W.enemies[t])t=resolveId(W,'item',t)||resolveId(W,'location',t)||resolveId(W,'enemy',t)||t;if(W.items[t])return`【${W.items[t].name}】: ${W.items[t].effect},值=${W.items[t].val}`;if(W.locations[t])return`【${W.locations[t].name}】: ${W.locations[t].desc}`;if(W.enemies[t])return`【${W.enemies[t].name}】: HP=${W.enemies[t].hp}/${W.enemies[t].maxHp}`;return`"${t}"无详细信息。`;}
+        case'use_item':{let iid=params.item;if(iid&&!agent.inventory.includes(iid))iid=resolveId(W,'item',iid)||iid;if(!agent.inventory.includes(iid))return`背包没有"${iid}"。`;const item=W.items[iid];if(!item)return'无效物品。';if(item.effect==='heal'){const h=Math.min(item.val,agent.maxHp-agent.hp);agent.hp+=h;agent.inventory=agent.inventory.filter(i=>i!==iid);return`使用【${item.name}】，+${h}HP (${agent.hp}/${agent.maxHp})`;}return`使用【${item.name}】`;}
+        case'rest':{const h=Math.min(20,agent.maxHp-agent.hp);agent.hp+=h;return`休息，+${h}HP (${agent.hp}/${agent.maxHp})`;}
+        case'complete_turn':return`结束回合。${params.summary||''}`;
+        default:{const u=String(tool).toLowerCase();if(['insult','curse','greet','say','talk','yell'].some(k=>u.includes(k)))return`【${agent.name}】${params.message||params.text||tool}`;if(['go','walk','run','enter','flee'].some(k=>u.includes(k))&&(params.destination||params.target))return executeTool(agent,'move',{destination:params.destination||params.target});if(['hit','fight','strike','slash'].some(k=>u.includes(k))&&params.target)return executeTool(agent,'attack',{target:params.target});return`【${agent.name}】${params.text||params.message||tool}`;}}
     }
 
     function executeGMTool(tool,params){const W=G.world,all=[...(G.userAgent?[G.userAgent]:[]),...G.agents];switch(tool){case'narrate_event':return params.text||'';case'spawn_enemy':{const loc=W.locations[params.location];if(!loc||!W.enemies[params.enemy_id])return'无效';if(!loc.enemies.includes(params.enemy_id)){loc.enemies.push(params.enemy_id);W.enemies[params.enemy_id].hp=W.enemies[params.enemy_id].maxHp;}return`👹【${loc.name}】出现了${W.enemies[params.enemy_id].name}！`;}case'heal_character':{const a=all.find(x=>x.id===params.target||x.name===params.target);if(!a)return'找不到角色';const h=Math.min(params.amount||10,a.maxHp-a.hp);a.hp+=h;return`🩹 ${a.name}+${h}HP (${a.hp}/${a.maxHp})`;}case'damage_character':{const a=all.find(x=>x.id===params.target||x.name===params.target);if(!a)return'找不到角色';a.hp=Math.max(0,a.hp-(params.amount||5));return`⚡ ${a.name}-${params.amount||5}HP${params.reason?`（${params.reason}）`:''} → ${a.hp}/${a.maxHp}`;}default:return params.text||tool;}}
@@ -113,32 +208,88 @@
     function broadcastEvent(from,toId,msg){G.msgQueue.push({from:from.id,fromName:from.name,to:toId,msg,round:G.round});}
 
     // ══════════════════════════════════════════════════════════════
-    //  PART 4 — LLM 层
+    //  PART 4 — LLM 层 (AbortController + 友好错误 + JSON修复)
     // ══════════════════════════════════════════════════════════════
-    async function callLLM(sys,prompt){const s=cfg();METRICS.llmCalls++;const t0=Date.now();if(s.apiUrl?.trim()){const r=await fetch(s.apiUrl.trim(),{method:'POST',headers:{'Content-Type':'application/json',...(s.apiKey?{Authorization:`Bearer ${s.apiKey}`}:{})},body:JSON.stringify({model:s.apiModel||'gpt-4o-mini',messages:[{role:'system',content:sys},{role:'user',content:prompt}],temperature:.75,max_tokens:600})});if(!r.ok)throw new Error(`API ${r.status}`);const d=await r.json();METRICS.totalResponseMs+=Date.now()-t0;return d.choices?.[0]?.message?.content||'';}const{generateRaw}=SillyTavern.getContext();const res=await generateRaw({systemPrompt:sys,prompt});METRICS.totalResponseMs+=Date.now()-t0;return res;}
-    async function callLLMFC(messages,tools){const s=cfg();METRICS.llmCalls++;METRICS.fcCalls++;const t0=Date.now();if(!s.apiUrl?.trim())throw new Error('FC需要自定义API');const r=await fetch(s.apiUrl.trim(),{method:'POST',headers:{'Content-Type':'application/json',...(s.apiKey?{Authorization:`Bearer ${s.apiKey}`}:{})},body:JSON.stringify({model:s.apiModel||'gpt-4o-mini',messages,tools,tool_choice:'auto',temperature:.75,max_tokens:800})});if(!r.ok)throw new Error(`API ${r.status}`);METRICS.totalResponseMs+=Date.now()-t0;return(await r.json()).choices?.[0]?.message||{};}
-    function callTO(fn){const ms=cfg().llmTimeout||60000;return new Promise((ok,no)=>{let d=false;const t=setTimeout(()=>{if(d)return;d=true;const e=new Error(`超时(${ms/1000}s)`);e.name='TimeoutError';no(e);},ms);fn().then(r=>{if(d)return;d=true;clearTimeout(t);ok(r);}).catch(e=>{if(d)return;d=true;clearTimeout(t);no(e);});});}
-    function buildSysPrompt(a){const W=G.world,o=G.agents.filter(x=>x.id!==a.id),ids=[...(G.userAgent?[`${G.userAgent.name}(${G.userAgent.id})`]:[]),...o.map(x=>`${x.name}(${x.id})`)].join(', '),lids=Object.entries(W.locations).map(([id,l])=>`${l.name}→${id}`).join(', '),iids=Object.entries(W.items).map(([id,it])=>`${it.name}→${id}`).join(', '),eids=Object.entries(W.enemies).map(([id,en])=>`${en.name}→${id}`).join(', ');return`${a.prompt}\n${cfg().worldInfo?`【世界信息】${cfg().worldInfo}\n`:''}【合法ID】地点:${lids} 物品:${iids} 敌人:${eids} 角色:${ids}`;}
-    function buildStatePrompt(a){const W=G.world,loc=W.locations[a.location],o=G.agents.filter(x=>x.id!==a.id),msgs=G.msgQueue.filter(m=>m.to===a.id&&m.round>=G.round-1),hist=G.actionsHistory.filter(h=>h.agentId!==a.id&&h.round>=G.round-1).slice(-5);return`R${G.round} | ${loc.name}(${a.location}) HP:${a.hp}/${a.maxHp} 💰${a.gold}\n背包:[${a.inventory.map(i=>W.items[i]?.name||i).join('、')||'空'}] 地面:[${loc.items.map(i=>W.items[i]?.name||i).join('、')||'无'}]\n敌人:[${loc.enemies.map(e=>`${W.enemies[e]?.name}(HP:${W.enemies[e]?.hp})`).join('、')||'无'}] 可前往:${loc.conn.map(c=>`${W.locations[c]?.name}(${c})`).join('、')}\n队友:${[...(G.userAgent?[`${G.userAgent.icon}${G.userAgent.name} HP:${G.userAgent.hp} @${W.locations[G.userAgent.location]?.name}`]:[]),...o.map(x=>`${x.icon}${x.name} HP:${x.hp} @${W.locations[x.location]?.name}`)].join(' | ')}\n${msgs.length?`消息:${msgs.map(m=>`${m.fromName}:"${m.msg}"`).join(' ')}`:''}\n${hist.length?`动态:${hist.map(h=>`[R${h.round}]${h.agentName}:${h.tool}`).join(' ')}`:''}`;
+    function friendlyError(status, fallbackMsg){
+        return ERR_HINTS[status] || fallbackMsg || `API 错误 ${status}`;
     }
+
+    function tryFixJSON(raw){
+        let s = (raw||'').trim();
+        const m = s.match(/\{[\s\S]*\}/);
+        if(!m) return null;
+        s = m[0];
+        try{return JSON.parse(s);}catch(_){}
+        s = s.replace(/'/g,'"').replace(/,\s*}/g,'}').replace(/,\s*]/g,']');
+        s = s.replace(/([{,]\s*)(\w+)\s*:/g,'$1"$2":');
+        try{return JSON.parse(s);}catch(_){return null;}
+    }
+
+    function makeAbort(){
+        if(activeAbort){try{activeAbort.abort();}catch(_){}}
+        activeAbort = new AbortController();
+        return activeAbort.signal;
+    }
+
+    async function callLLM(sys,prompt){
+        const s=cfg();METRICS.llmCalls++;const t0=Date.now();
+        if(s.apiUrl?.trim()){
+            const signal=makeAbort();
+            const r=await fetch(s.apiUrl.trim(),{method:'POST',signal,headers:{'Content-Type':'application/json',...(s.apiKey?{Authorization:`Bearer ${s.apiKey}`}:{})},body:JSON.stringify({model:s.apiModel||'gpt-4o-mini',messages:[{role:'system',content:sys},{role:'user',content:prompt}],temperature:.75,max_tokens:600})});
+            if(!r.ok)throw new Error(friendlyError(r.status));
+            const d=await r.json();METRICS.totalResponseMs+=Date.now()-t0;return d.choices?.[0]?.message?.content||'';
+        }
+        const{generateRaw}=SillyTavern.getContext();const res=await generateRaw({systemPrompt:sys,prompt});METRICS.totalResponseMs+=Date.now()-t0;return res;
+    }
+
+    async function callLLMFC(messages,tools){
+        const s=cfg();METRICS.llmCalls++;METRICS.fcCalls++;const t0=Date.now();
+        if(!s.apiUrl?.trim())throw new Error('Function Calling 需要自定义 API 地址');
+        const signal=makeAbort();
+        const r=await fetch(s.apiUrl.trim(),{method:'POST',signal,headers:{'Content-Type':'application/json',...(s.apiKey?{Authorization:`Bearer ${s.apiKey}`}:{})},body:JSON.stringify({model:s.apiModel||'gpt-4o-mini',messages,tools,tool_choice:'auto',temperature:.75,max_tokens:800})});
+        if(!r.ok)throw new Error(friendlyError(r.status));
+        METRICS.totalResponseMs+=Date.now()-t0;return(await r.json()).choices?.[0]?.message||{};
+    }
+
+    function callTO(fn){
+        const ms=cfg().llmTimeout||60000;
+        return new Promise((ok,no)=>{
+            let d=false;
+            const t=setTimeout(()=>{if(d)return;d=true;const e=new Error(`LLM 响应超时（${ms/1000}秒），请检查网络或增大超时设置`);e.name='TimeoutError';no(e);},ms);
+            fn().then(r=>{if(d)return;d=true;clearTimeout(t);ok(r);}).catch(e=>{if(d)return;d=true;clearTimeout(t);no(e);});
+        });
+    }
+
+    function buildSysPrompt(a){const W=G.world,o=G.agents.filter(x=>x.id!==a.id),ids=[...(G.userAgent?[`${G.userAgent.name}(${G.userAgent.id})`]:[]),...o.map(x=>`${x.name}(${x.id})`)].join(', '),lids=Object.entries(W.locations).map(([id,l])=>`${l.name}→${id}`).join(', '),iids=Object.entries(W.items).map(([id,it])=>`${it.name}→${id}`).join(', '),eids=Object.entries(W.enemies).map(([id,en])=>`${en.name}→${id}`).join(', ');return`${a.prompt}\n${cfg().worldInfo?`【世界信息】${cfg().worldInfo}\n`:''}【合法ID】地点:${lids} 物品:${iids} 敌人:${eids} 角色:${ids}`;}
+    function buildStatePrompt(a){const W=G.world,loc=W.locations[a.location],o=G.agents.filter(x=>x.id!==a.id),msgs=G.msgQueue.filter(m=>m.to===a.id&&m.round>=G.round-1),hist=G.actionsHistory.filter(h=>h.agentId!==a.id&&h.round>=G.round-1).slice(-5);return`R${G.round} | ${loc.name}(${a.location}) HP:${a.hp}/${a.maxHp} ATK:${a.atk||20} DEF:${a.def||0} 💰${a.gold}\n背包:[${a.inventory.map(i=>W.items[i]?.name||i).join('、')||'空'}] 地面:[${loc.items.map(i=>W.items[i]?.name||i).join('、')||'无'}]\n敌人:[${loc.enemies.map(e=>`${W.enemies[e]?.name}(HP:${W.enemies[e]?.hp})`).join('、')||'无'}] 可前往:${loc.conn.map(c=>`${W.locations[c]?.name}(${c})`).join('、')}\n队友:${[...(G.userAgent?[`${G.userAgent.icon}${G.userAgent.name} HP:${G.userAgent.hp} @${W.locations[G.userAgent.location]?.name}`]:[]),...o.map(x=>`${x.icon}${x.name} HP:${x.hp} @${W.locations[x.location]?.name}`)].join(' | ')}\n${msgs.length?`消息:${msgs.map(m=>`${m.fromName}:"${m.msg}"`).join(' ')}`:''}\n${hist.length?`动态:${hist.map(h=>`[R${h.round}]${h.agentName}:${h.tool}`).join(' ')}`:''}`.trim();}
     function buildReActPrompt(a,step,hist){return`【角色】${a.prompt}\n${cfg().worldInfo?`【世界】${cfg().worldInfo}\n`:''}${buildStatePrompt(a)}\n${pt('toolsDesc')}\n${hist.length?`【已执行】${hist.map(h=>`步${h.step}:${h.tool}→${h.obs.substring(0,50)}`).join(' | ')}`:''}步骤${step}：\n${pt('outputFormat')}`;}
-    function parseReAct(raw){const thought=(raw.match(/THOUGHT:\s*([\s\S]*?)(?=\nACTION:|$)/i)||[])[1]?.trim()||'';const ar=(raw.match(/ACTION:\s*([\s\S]*)/i)||[])[1]?.trim()||'';let tool=null,params={};const jm=ar.match(/\{[\s\S]*\}/);if(jm)try{const o=JSON.parse(jm[0]);tool=o.tool;params=o.params||{};}catch(_){}return{thought,tool,params,rawAction:tool?'':ar};}
+
+    function parseReAct(raw){
+        const thought=(raw.match(/THOUGHT:\s*([\s\S]*?)(?=\nACTION:|$)/i)||[])[1]?.trim()||'';
+        const ar=(raw.match(/ACTION:\s*([\s\S]*)/i)||[])[1]?.trim()||'';
+        let tool=null,params={};
+        const fixed = tryFixJSON(ar);
+        if(fixed && fixed.tool){tool=fixed.tool;params=fixed.params||{};}
+        return{thought,tool,params,rawAction:tool?'':ar};
+    }
 
     // ══════════════════════════════════════════════════════════════
     //  PART 5 — Agent 执行
     // ══════════════════════════════════════════════════════════════
     function ruleIntent(msg,W){const s=String(msg||'').trim();if(!s||!W)return null;for(const k of['前往','去往','去','到','进入']){if(s.startsWith(k)&&s.length>k.length){const id=resolveId(W,'location',s.slice(k.length).trim());if(id)return{tool:'move',params:{destination:id}};}}for(const k of['攻击','打','揍','砍']){if(s.startsWith(k)){const rest=s.slice(k.length).replace(/^[了着一下]\s*/,'').trim();const id=resolveId(W,'enemy',rest)||resolveId(W,'agent',rest);if(id)return{tool:'attack',params:{target:id}};}}for(const k of['拾取','拿','捡']){if(s.startsWith(k)){const id=resolveId(W,'item',s.slice(k.length).trim());if(id)return{tool:'pickup_item',params:{target:id}};}}for(const k of['使用','用','吃','喝']){if(s.startsWith(k)){const id=resolveId(W,'item',s.slice(k.length).replace(/^[了着]\s*/,'').trim());if(id)return{tool:'use_item',params:{item:id}};}}const sm=s.match(/^(?:对|和|跟|向)(.+?)(?:说|道|讲)(?:[:：]?\s*)?(.*)$/);if(sm){const id=resolveId(W,'agent',sm[1].trim());if(id)return{tool:'speak',params:{to:id,message:sm[2]?.trim()||'…'}};}if(/^(搜索|搜|探索)/.test(s))return{tool:'search',params:{}};if(/^(休息|歇|回血)/.test(s))return{tool:'rest',params:{}};return null;}
-    async function parseUserIntent(msg){const u=G.userAgent,W=G.world;if(!u||!W)return{tool:'narrate',params:{text:msg}};const r=ruleIntent(msg,W);if(r)return r;const all=[...(G.userAgent?[G.userAgent]:[]),...G.agents],loc=W.locations[u.location];try{const raw=await callTO(()=>callLLM('将用户自然语言映射为游戏操作。只输出JSON{"tool":"","params":{}}',`用户:${msg}\n位置:${loc?.name}(${u.location}) 角色:${all.map(a=>`${a.name}→${a.id}`).join(',')}\n敌人:${(loc?.enemies||[]).map(e=>`${W.enemies[e]?.name}(${e})`).join(',')||'无'}\n地点:${Object.entries(W.locations).map(([id,l])=>`${l.name}→${id}`).join(',')}`));const m=(raw||'').match(/\{[\s\S]*?\}/);if(m){const o=JSON.parse(m[0]);if(o.tool)return{tool:o.tool,params:resolveParams(W,o.tool,o.params||{})};}}catch(_){}return{tool:'narrate',params:{text:msg}};}
-    async function interpretNatural(agent,text){const W=G.world,all=[...(G.userAgent?[G.userAgent]:[]),...G.agents];try{const raw=await callTO(()=>callLLM('将Agent自然语言解析为游戏指令。只输出JSON{"tool":"","params":{}}',`Agent(${agent.name}):${text}\n角色:${all.map(a=>`${a.name}→${a.id}`).join(',')}`));const m=(raw||'').match(/\{[\s\S]*?\}/);if(m){const o=JSON.parse(m[0]);if(o.tool)return{tool:o.tool,params:resolveParams(W,o.tool,o.params||{})};}}catch(_){}return{tool:'narrate',params:{text}};}
+
+    async function parseUserIntent(msg){const u=G.userAgent,W=G.world;if(!u||!W)return{tool:'narrate',params:{text:msg}};const r=ruleIntent(msg,W);if(r)return r;const all=[...(G.userAgent?[G.userAgent]:[]),...G.agents],loc=W.locations[u.location];try{const raw=await callTO(()=>callLLM('将用户自然语言映射为游戏操作。只输出JSON{"tool":"","params":{}}',`用户:${msg}\n位置:${loc?.name}(${u.location}) 角色:${all.map(a=>`${a.name}→${a.id}`).join(',')}\n敌人:${(loc?.enemies||[]).map(e=>`${W.enemies[e]?.name}(${e})`).join(',')||'无'}\n地点:${Object.entries(W.locations).map(([id,l])=>`${l.name}→${id}`).join(',')}`));const fixed=tryFixJSON(raw);if(fixed&&fixed.tool)return{tool:fixed.tool,params:resolveParams(W,fixed.tool,fixed.params||{})};}catch(_){}return{tool:'narrate',params:{text:msg}};}
+
+    async function interpretNatural(agent,text){const W=G.world,all=[...(G.userAgent?[G.userAgent]:[]),...G.agents];try{const raw=await callTO(()=>callLLM('将Agent自然语言解析为游戏指令。只输出JSON{"tool":"","params":{}}',`Agent(${agent.name}):${text}\n角色:${all.map(a=>`${a.name}→${a.id}`).join(',')}`));const fixed=tryFixJSON(raw);if(fixed&&fixed.tool)return{tool:fixed.tool,params:resolveParams(W,fixed.tool,fixed.params||{})};}catch(_){}return{tool:'narrate',params:{text}};}
     function fallbackAction(a){const W=G.world,loc=W.locations[a.location],msgs=G.msgQueue.filter(m=>m.to===a.id&&m.round>=G.round-1);if(msgs.length)return{thought:'回应消息。',tool:'speak',params:{to:msgs[msgs.length-1].from,message:'…'}};if(a.hp<a.maxHp*.7){const hi=a.inventory.find(i=>W.items[i]?.effect==='heal');if(hi)return{thought:'治疗。',tool:'use_item',params:{item:hi}};}if(loc.enemies.length)return{thought:'应战！',tool:'attack',params:{target:loc.enemies[0]}};return{thought:'观察。',tool:'narrate',params:{text:`${a.name}保持警惕。`}};}
 
-    async function runTurnFC(agent){const mx=cfg().maxSteps||5,msgs=[{role:'system',content:buildSysPrompt(agent)},{role:'user',content:buildStatePrompt(agent)}];for(let s=1;s<=mx;s++){if(G.paused)await waitResume();if(G.stopReq||!G.running)break;const sc=getScenario(),gl=sc.checkGoal(agent,G.world);if(gl.done){postSystemMsg(`✅ ${agent.name}：${gl.reason}`);break;}const tid=postThinking(agent,s,mx);try{const resp=await callTO(()=>callLLMFC(msgs,FC_TOOLS));removeThinking(tid);if(resp.tool_calls?.length){msgs.push({role:'assistant',content:resp.content||null,tool_calls:resp.tool_calls});for(const tc of resp.tool_calls){let args;try{args=JSON.parse(tc.function.arguments||'{}');}catch(_){args={};}const rA=resolveParams(G.world,tc.function.name,args);const res=executeTool(agent,tc.function.name,rA);msgs.push({role:'tool',tool_call_id:tc.id,content:res});METRICS.toolCalls++;G.actionsHistory.push({round:G.round,agentId:agent.id,agentName:agent.name,tool:tc.function.name,observation:res});postAgentMsg(agent,s,resp.content,tc.function.name,res,mx,true);}trimHist();updateAll();if(agent.hp<=0){postSystemMsg(`💀 ${agent.name}倒下`,'error');break;}if(resp.tool_calls.some(tc=>tc.function.name==='complete_turn'))break;await sleep(cfg().stepDelay);}else{if(resp.content)postAgentMsg(agent,s,resp.content,'narrate',resp.content,mx,true);break;}}catch(e){removeThinking(tid);METRICS.errors++;if(e.name==='TimeoutError'){postSystemMsg(`⏱️ ${agent.name}超时`,'warn');break;}const fb=fallbackAction(agent);postAgentMsg(agent,s,fb.thought,fb.tool,executeTool(agent,fb.tool,fb.params),mx,false);break;}}}
+    async function runTurnFC(agent){const mx=cfg().maxSteps||5,msgs=[{role:'system',content:buildSysPrompt(agent)},{role:'user',content:buildStatePrompt(agent)}];for(let s=1;s<=mx;s++){if(G.paused)await waitResume();if(G.stopReq||!G.running)break;const sc=getScenario(),gl=sc.checkGoal(agent,G.world);if(gl.done){postSystemMsg(`✅ ${agent.name}：${gl.reason}`);break;}const tid=postThinking(agent,s,mx);try{const resp=await callTO(()=>callLLMFC(msgs,FC_TOOLS));removeThinking(tid);if(resp.tool_calls?.length){msgs.push({role:'assistant',content:resp.content||null,tool_calls:resp.tool_calls});for(const tc of resp.tool_calls){let args;try{args=JSON.parse(tc.function.arguments||'{}');}catch(_){args=tryFixJSON(tc.function.arguments)||{};}const rA=resolveParams(G.world,tc.function.name,args);const res=executeTool(agent,tc.function.name,rA);msgs.push({role:'tool',tool_call_id:tc.id,content:res});METRICS.toolCalls++;G.actionsHistory.push({round:G.round,agentId:agent.id,agentName:agent.name,tool:tc.function.name,observation:res});postAgentMsg(agent,s,resp.content,tc.function.name,res,mx,true);}trimHist();updateAll();if(agent.hp<=0){postSystemMsg(`💀 ${agent.name}倒下`,'error');break;}if(resp.tool_calls.some(tc=>tc.function.name==='complete_turn'))break;await sleep(cfg().stepDelay);}else{if(resp.content)postAgentMsg(agent,s,resp.content,'narrate',resp.content,mx,true);break;}}catch(e){removeThinking(tid);METRICS.errors++;if(e.name==='AbortError')break;if(e.name==='TimeoutError'){postSystemMsg(`⏱️ ${agent.name}：${e.message}`,'warn');break;}addLog(`FC错误: ${e.message}`,'error');const fb=fallbackAction(agent);postAgentMsg(agent,s,fb.thought,fb.tool,executeTool(agent,fb.tool,fb.params),mx,false);break;}}}
 
-    async function runTurnReAct(agent){const mx=cfg().maxSteps||5;const hist=[];let fails=0;for(let s=1;s<=mx;s++){if(G.paused)await waitResume();if(G.stopReq||!G.running)break;const sc=getScenario(),gl=sc.checkGoal(agent,G.world);if(gl.done){postSystemMsg(`✅ ${agent.name}：${gl.reason}`);break;}const tid=postThinking(agent,s,mx);let parsed=null;try{const raw=await callTO(()=>callLLM(pt('systemPrompt'),buildReActPrompt(agent,s,hist)));METRICS.textCalls++;parsed=parseReAct(raw);}catch(e){removeThinking(tid);METRICS.errors++;if(e.name==='TimeoutError'){postSystemMsg(`⏱️ ${agent.name}超时`,'warn');break;}fails++;if(fails>=3)break;continue;}if(!parsed||(!parsed.tool&&!parsed.rawAction&&!parsed.thought)){removeThinking(tid);fails++;if(fails>=3)break;const fb=fallbackAction(agent);const obs=executeTool(agent,fb.tool,fb.params);hist.push({step:s,tool:fb.tool,params:fb.params,obs});METRICS.toolCalls++;G.actionsHistory.push({round:G.round,agentId:agent.id,agentName:agent.name,tool:fb.tool,observation:obs});postAgentMsg(agent,s,fb.thought,fb.tool,obs,mx,false);updateAll();await sleep(cfg().stepDelay);continue;}fails=0;let tool=parsed.tool,params=parsed.params;if(!tool&&parsed.rawAction){const i=await interpretNatural(agent,parsed.rawAction);tool=i.tool;params=i.params;}if(!tool&&parsed.thought){tool='narrate';params={text:parsed.thought};}const obs=executeTool(agent,tool||'rest',params||{});hist.push({step:s,tool:tool||'rest',params:params||{},obs});METRICS.toolCalls++;G.actionsHistory.push({round:G.round,agentId:agent.id,agentName:agent.name,tool:tool||'rest',observation:obs});trimHist();removeThinking(tid);postAgentMsg(agent,s,parsed.thought,tool||'rest',obs,mx,false);updateAll();if(tool==='complete_turn')break;if(agent.hp<=0){postSystemMsg(`💀 ${agent.name}倒下`,'error');break;}await sleep(cfg().stepDelay);}}
+    async function runTurnReAct(agent){const mx=cfg().maxSteps||5;const hist=[];let fails=0;for(let s=1;s<=mx;s++){if(G.paused)await waitResume();if(G.stopReq||!G.running)break;const sc=getScenario(),gl=sc.checkGoal(agent,G.world);if(gl.done){postSystemMsg(`✅ ${agent.name}：${gl.reason}`);break;}const tid=postThinking(agent,s,mx);let parsed=null;try{const raw=await callTO(()=>callLLM(pt('systemPrompt'),buildReActPrompt(agent,s,hist)));METRICS.textCalls++;parsed=parseReAct(raw);}catch(e){removeThinking(tid);METRICS.errors++;if(e.name==='AbortError')break;if(e.name==='TimeoutError'){postSystemMsg(`⏱️ ${agent.name}：${e.message}`,'warn');break;}addLog(`ReAct错误: ${e.message}`,'error');fails++;if(fails>=3)break;continue;}if(!parsed||(!parsed.tool&&!parsed.rawAction&&!parsed.thought)){removeThinking(tid);fails++;if(fails>=3)break;const fb=fallbackAction(agent);const obs=executeTool(agent,fb.tool,fb.params);hist.push({step:s,tool:fb.tool,params:fb.params,obs});METRICS.toolCalls++;G.actionsHistory.push({round:G.round,agentId:agent.id,agentName:agent.name,tool:fb.tool,observation:obs});postAgentMsg(agent,s,fb.thought,fb.tool,obs,mx,false);updateAll();await sleep(cfg().stepDelay);continue;}fails=0;let tool=parsed.tool,params=parsed.params;if(!tool&&parsed.rawAction){const i=await interpretNatural(agent,parsed.rawAction);tool=i.tool;params=i.params;}if(!tool&&parsed.thought){tool='narrate';params={text:parsed.thought};}const obs=executeTool(agent,tool||'rest',params||{});hist.push({step:s,tool:tool||'rest',params:params||{},obs});METRICS.toolCalls++;G.actionsHistory.push({round:G.round,agentId:agent.id,agentName:agent.name,tool:tool||'rest',observation:obs});trimHist();removeThinking(tid);postAgentMsg(agent,s,parsed.thought,tool||'rest',obs,mx,false);updateAll();if(tool==='complete_turn')break;if(agent.hp<=0){postSystemMsg(`💀 ${agent.name}倒下`,'error');break;}await sleep(cfg().stepDelay);}}
 
     async function runTurn(agent){METRICS.turns++;if(cfg().useFunctionCalling&&cfg().apiUrl?.trim())await runTurnFC(agent);else await runTurnReAct(agent);}
 
-    async function runGMTurn(){if(!G.gmEnabled){runEnvFallback();return;}const useFC=cfg().useFunctionCalling&&cfg().apiUrl?.trim(),W=G.world,all=[...(G.userAgent?[G.userAgent]:[]),...G.agents];const st=all.map(a=>`${a.name}(${a.id}) HP:${a.hp}/${a.maxHp} @${W.locations[a.location]?.name}`).join('\n');const ls=Object.entries(W.locations).map(([id,l])=>`${l.name}(${id}): 敌[${l.enemies.map(e=>W.enemies[e]?.name).join(',')||'无'}]`).join('\n');const gmSys='你是GM。推进剧情、制造紧张感、维持平衡。每回合1-2个动作。';const gmP=`R${G.round}:\n${st}\n\n${ls}\n敌人ID:${Object.keys(W.enemies).join(',')} 地点ID:${Object.keys(W.locations).join(',')}`;postSystemMsg('🌍 ── GM 回合 ──','env');if(useFC){try{const resp=await callTO(()=>callLLMFC([{role:'system',content:gmSys},{role:'user',content:gmP}],GM_FC_TOOLS));if(resp.tool_calls?.length)for(const tc of resp.tool_calls){let args;try{args=JSON.parse(tc.function.arguments||'{}');}catch(_){args={};}postSystemMsg(executeGMTool(tc.function.name,args),'env');}else if(resp.content)postSystemMsg(resp.content,'env');}catch(_){runEnvFallback();}}else{try{const raw=await callTO(()=>callLLM(gmSys,gmP+'\n叙述本回合环境事件（1-2句）。'));if(raw)postSystemMsg(raw.trim(),'env');else runEnvFallback();}catch(_){runEnvFallback();}}updateAll();}
+    async function runGMTurn(){if(!G.gmEnabled){runEnvFallback();return;}const useFC=cfg().useFunctionCalling&&cfg().apiUrl?.trim(),W=G.world,all=[...(G.userAgent?[G.userAgent]:[]),...G.agents];const st=all.map(a=>`${a.name}(${a.id}) HP:${a.hp}/${a.maxHp} @${W.locations[a.location]?.name}`).join('\n');const ls=Object.entries(W.locations).map(([id,l])=>`${l.name}(${id}): 敌[${l.enemies.map(e=>W.enemies[e]?.name).join(',')||'无'}]`).join('\n');const gmSys='你是GM。推进剧情、制造紧张感、维持平衡。每回合1-2个动作。';const gmP=`R${G.round}:\n${st}\n\n${ls}\n敌人ID:${Object.keys(W.enemies).join(',')} 地点ID:${Object.keys(W.locations).join(',')}`;postSystemMsg('🌍 ── GM 回合 ──','env');if(useFC){try{const resp=await callTO(()=>callLLMFC([{role:'system',content:gmSys},{role:'user',content:gmP}],GM_FC_TOOLS));if(resp.tool_calls?.length)for(const tc of resp.tool_calls){let args;try{args=JSON.parse(tc.function.arguments||'{}');}catch(_){args=tryFixJSON(tc.function.arguments)||{};}postSystemMsg(executeGMTool(tc.function.name,args),'env');}else if(resp.content)postSystemMsg(resp.content,'env');}catch(_){runEnvFallback();}}else{try{const raw=await callTO(()=>callLLM(gmSys,gmP+'\n叙述本回合环境事件（1-2句）。'));if(raw)postSystemMsg(raw.trim(),'env');else runEnvFallback();}catch(_){runEnvFallback();}}updateAll();}
 
     function runEnvFallback(){const W=G.world,sc=getScenario(),all=[...(G.userAgent?[G.userAgent]:[]),...G.agents],evs=[];const s0=Object.keys(sc.world.locations)[0];all.forEach(a=>{if(!a||a.hp<=0)return;if(a.location===s0&&a.hp<a.maxHp){const h=15;a.hp=Math.min(a.maxHp,a.hp+h);evs.push(`🏠 ${a.name}休整+${h}HP (${a.hp}/${a.maxHp})`);}});all.forEach(a=>{if(!a||a.hp<=0)return;const loc=W.locations[a.location];if(loc.enemies.length&&a.location!==s0){a.hp=Math.max(0,a.hp-5);evs.push(`⚡ ${a.name}受威胁-5HP (${a.hp}/${a.maxHp})`);}});Object.entries(sc.enemyHome||{}).forEach(([eid,lid])=>{const loc=W.locations[lid];if(loc&&!loc.enemies.includes(eid)&&Math.random()<.3){loc.enemies.push(eid);W.enemies[eid].hp=W.enemies[eid].maxHp;evs.push(`👹【${W.locations[lid].name}】出现${W.enemies[eid].name}！`);}});const narrs=(pt('envNarrations')||'').split('\n').filter(Boolean);if(narrs.length&&Math.random()<.4)evs.push(narrs[Math.floor(Math.random()*narrs.length)]);if(evs.length)evs.forEach(e=>postSystemMsg(e,'env'));else postSystemMsg('风平浪静。','env');}
     function trimHist(){G.actionsHistory=G.actionsHistory.filter(h=>h.round>=G.round-2);}
@@ -146,10 +297,16 @@
     // ══════════════════════════════════════════════════════════════
     //  PART 6 — 协调层
     // ══════════════════════════════════════════════════════════════
-    function doInit(){const s=cfg();s.userName=document.getElementById('mac-s-uname')?.value?.trim()||s.userName;s.userIcon=document.getElementById('mac-s-uicon')?.value?.trim()||s.userIcon;saveCfg();resetGame();METRICS={llmCalls:0,toolCalls:0,fcCalls:0,textCalls:0,turns:0,rounds:0,errors:0,totalResponseMs:0,successes:0,failures:0};updateAll();const sc=getScenario();postSystemMsg(`═══ ${sc.name}世界已初始化 ═══`);postSystemMsg(`${G.userAgent.icon}${G.userAgent.name}(主角) + NPC: ${G.agents.map(a=>`${a.icon}${a.name}`).join('、')}`);postSystemMsg(`模式: ${cfg().useFunctionCalling&&cfg().apiUrl?'Function Calling':'ReAct文本'} | GM: ${G.gmEnabled?'ON':'OFF'}`);addLog('初始化完成');navigateTo('game');}
+    function doInit(){const s=cfg();s.userName=document.getElementById('mac-s-uname')?.value?.trim()||s.userName;s.userIcon=document.getElementById('mac-s-uicon')?.value?.trim()||s.userIcon;saveCfg();resetGame();METRICS={llmCalls:0,toolCalls:0,fcCalls:0,textCalls:0,turns:0,rounds:0,errors:0,totalResponseMs:0,successes:0,failures:0};updateAll();const sc=getScenario();postSystemMsg(`═══ ${sc.name}世界已初始化 ═══`);postSystemMsg(`${G.userAgent.icon}${G.userAgent.name}(主角) + NPC: ${G.agents.map(a=>`${a.icon}${a.name}`).join('、')}`);postSystemMsg(`模式: ${cfg().useFunctionCalling&&cfg().apiUrl?'Function Calling':'ReAct文本'} | GM: ${G.gmEnabled?'ON':'OFF'} | 通道: ${cfg().msgChannel}`);addLog('初始化完成');navigateTo('game');}
     function doStart(){if(!G.inited||G.running)return;G.running=true;G.stopReq=false;G.paused=false;updateAll();gameLoop();}
     function doPause(){G.paused=!G.paused;updateAll();postSystemMsg(G.paused?'⏸ 已暂停':'▶ 继续');}
-    function doStop(){G.stopReq=true;G.running=false;G.waitingForUser=false;if(G.userActionResolve){G.userActionResolve('休息');G.userActionResolve=null;}setInputEnabled(false);updateAll();postSystemMsg('⏹ 游戏已停止');}
+    function doStop(){
+        G.stopReq=true;G.running=false;G.waitingForUser=false;
+        if(activeAbort){try{activeAbort.abort();}catch(_){}}
+        activeAbort=null;
+        if(G.userActionResolve){G.userActionResolve('休息');G.userActionResolve=null;}
+        setInputEnabled(false);updateAll();postSystemMsg('⏹ 游戏已停止');
+    }
 
     async function gameLoop(){const s=cfg(),sc=getScenario();postSystemMsg('🚀 游戏开始（你先行动 → NPC → GM）');const sorted=[...G.agents].sort((a,b)=>a.priority-b.priority);while(G.running&&G.round<s.maxRounds){G.round++;METRICS.rounds++;postSystemMsg(`\n══ 第 ${G.round}/${s.maxRounds} 轮 ══`);updateAll();if(G.paused)await waitResume();if(G.stopReq||!G.running)break;const ui=await waitForUserAction();if(G.stopReq||!G.running)break;const parsed=await parseUserIntent(ui);const ur=G.userAgent?executeTool(G.userAgent,parsed.tool,parsed.params):'';if(G.userAgent){METRICS.toolCalls++;G.actionsHistory.push({round:G.round,agentId:'user',agentName:G.userAgent.name,tool:parsed.tool,observation:ur});trimHist();}postUserMsg(G.userAgent,ui,parsed.tool,ur);updateAll();if(G.userAgent?.hp<=0){postSystemMsg('💀 玩家倒下','error');METRICS.failures++;break;}for(let i=0;i<sorted.length;i++){if(G.stopReq||!G.running)break;if(G.paused)await waitResume();G.curIdx=G.agents.indexOf(sorted[i]);updateAll();if(sorted[i].hp<=0)continue;await runTurn(sorted[i]);updateAll();}await runGMTurn();const gl=sc.checkGoal(G.userAgent||G.agents[0],G.world);if(gl.done&&(gl.reason.includes('完成')||gl.reason.includes('击败'))){postSystemMsg(`🏆 胜利！${gl.reason}`);METRICS.successes++;break;}if(G.agents.every(a=>a.hp<=0)&&(!G.userAgent||G.userAgent.hp<=0)){postSystemMsg('💀 全员阵亡','error');METRICS.failures++;break;}}if(G.round>=cfg().maxRounds&&G.running)postSystemMsg(`🎬 结束，共${G.round}轮`);G.running=false;setInputEnabled(false);updateAll();}
 
@@ -165,10 +322,14 @@
     async function runAutoTest(rounds){const sEl=document.getElementById('mac-e-status'),rEl=document.getElementById('mac-e-results');if(sEl)sEl.textContent='运行中…';resetMetrics();resetGame();G.running=true;const sc=getScenario(),sorted=[...G.agents].sort((a,b)=>a.priority-b.priority);for(let r=1;r<=(rounds||5)&&G.running;r++){G.round=r;METRICS.rounds++;const u=G.userAgent;if(u){const loc=G.world.locations[u.location];let act;if(loc.enemies.length)act={tool:'attack',params:{target:loc.enemies[0]}};else if(loc.items.length)act={tool:'search',params:{}};else if(loc.conn.length)act={tool:'move',params:{destination:loc.conn[Math.floor(Math.random()*loc.conn.length)]}};else act={tool:'rest',params:{}};executeTool(u,act.tool,act.params);METRICS.toolCalls++;}for(const a of sorted){if(a.hp<=0)continue;await runTurn(a);}runEnvFallback();const gl=sc.checkGoal(G.userAgent||G.agents[0],G.world);if(gl.done){gl.reason.includes('完成')||gl.reason.includes('击败')?METRICS.successes++:METRICS.failures++;break;}if(G.agents.every(a=>a.hp<=0)&&(!G.userAgent||G.userAgent.hp<=0)){METRICS.failures++;break;}}G.running=false;if(sEl)sEl.textContent='完成';if(rEl)rEl.innerHTML=`<pre style="color:var(--txt2);font-size:12px">${JSON.stringify(getMetrics(),null,2)}</pre>`;updateEval();}
 
     // ══════════════════════════════════════════════════════════════
-    //  PART 8 — UI: 全屏仪表盘 + 浮动HUD + 酒馆聊天注入
+    //  PART 8 — UI: 全屏仪表盘 + 浮动HUD + 酒馆聊天注入 + 消息通道
     // ══════════════════════════════════════════════════════════════
 
-    function getSTChat(){return document.getElementById('chat')||document.querySelector('.chat');}
+    const ST_CHAT_SELS = ['#chat','.chat','#sheld','.sheld','#chat_container .chat'];
+    function getSTChat(){for(const s of ST_CHAT_SELS){const e=document.querySelector(s);if(e)return e;}return null;}
+
+    function shouldFS(){const ch=cfg().msgChannel;return ch==='both'||ch==='fullscreen';}
+    function shouldST(){const ch=cfg().msgChannel;return ch==='both'||ch==='tavern';}
 
     function buildMsgHTML(ico,name,role,step,total,thought,tool,result,rawText,isFC){
         const c=TC[tool]||'#6a6258';
@@ -177,27 +338,25 @@
 
     function postUserMsg(ua,text,tool,result){
         const html=buildMsgHTML(ua?.icon||'👤',ua?.name||'玩家','主角',0,0,'',tool,result,text,false);
-        appendChat('mac-msg mac-msg-user',html);
-        appendSTChat('mac-st-bubble mac-st-user',html);
+        if(shouldFS())appendChat('mac-msg mac-msg-user',html);
+        if(shouldST())appendSTChat('mac-st-bubble mac-st-user',html);
     }
     function postAgentMsg(agent,step,thought,tool,result,total,isFC){
         const html=buildMsgHTML(agent.icon,agent.name,agent.role,step,total,thought,tool,result,'',isFC);
-        appendChat(`mac-msg${isFC?' mac-msg-fc':''}`,html);
-        appendSTChat(`mac-st-bubble${isFC?' mac-st-fc':''}`,html);
+        if(shouldFS())appendChat(`mac-msg${isFC?' mac-msg-fc':''}`,html);
+        if(shouldST())appendSTChat(`mac-st-bubble${isFC?' mac-st-fc':''}`,html);
     }
     function postSystemMsg(text,type='system'){
         const cls={system:'mac-msg-sys',env:'mac-msg-env mac-msg-sys',error:'mac-msg-err mac-msg-sys',warn:'mac-msg-wrn mac-msg-sys'};
         const stcls={system:'mac-st-sys',env:'mac-st-sys mac-st-env',error:'mac-st-sys mac-st-error',warn:'mac-st-sys mac-st-warn'};
-        appendChat(`mac-msg ${cls[type]||'mac-msg-sys'}`,text,true);
-        appendSTChat(stcls[type]||'mac-st-sys',text,true);
+        if(shouldFS())appendChat(`mac-msg ${cls[type]||'mac-msg-sys'}`,text,true);
+        if(shouldST())appendSTChat(stcls[type]||'mac-st-sys',text,true);
     }
     function postThinking(agent,step,total){
         const id=`mac-tk-${Date.now()}`;
         const html=`${agent.icon} ${agent.name} 思考中（步${step}/${total}）<span class="mac-dots">...</span>`;
-        const fs=document.getElementById('mac-game-chat');
-        if(fs){const d=document.createElement('div');d.id=id;d.className='mac-msg mac-msg-think';d.innerHTML=html;fs.appendChild(d);fs.scrollTop=fs.scrollHeight;}
-        const st=getSTChat();
-        if(st){const d=document.createElement('div');d.id=`st-${id}`;d.className='mac-st-think';d.innerHTML=html;st.appendChild(d);st.scrollTop=st.scrollHeight;}
+        if(shouldFS()){const fs=document.getElementById('mac-game-chat');if(fs){const d=document.createElement('div');d.id=id;d.className='mac-msg mac-msg-think';d.innerHTML=html;fs.appendChild(d);fs.scrollTop=fs.scrollHeight;}}
+        if(shouldST()){const st=getSTChat();if(st){const d=document.createElement('div');d.id=`st-${id}`;d.className='mac-st-think';d.innerHTML=html;st.appendChild(d);st.scrollTop=st.scrollHeight;}}
         return id;
     }
     function removeThinking(id){if(!id)return;document.getElementById(id)?.remove();document.getElementById(`st-${id}`)?.remove();}
@@ -218,22 +377,29 @@
         const ap=`<div class="mac-page" id="mac-page-agents"><div style="display:flex;gap:8px;margin-bottom:16px"><button class="mac-btn mac-btn-sm mac-btn-s" id="mac-a-add">➕ 添加</button><button class="mac-btn mac-btn-sm mac-btn-p" id="mac-a-save">💾 保存</button></div><div id="mac-a-list"></div></div>`;
         const wp=`<div class="mac-page" id="mac-page-world"><div class="mac-card"><div class="mac-card-t">选择场景</div><div class="mac-scn-grid" id="mac-w-scn"></div></div><div class="mac-sec"><div class="mac-sec-hd" data-t="mac-w-tpl-body">世界模板 JSON <span class="mac-sec-arr">▶</span></div><div id="mac-w-tpl-body" class="mac-sec-bd" style="display:none"><textarea class="mac-ta" id="mac-w-tpl" rows="12"></textarea><div style="margin-top:8px;display:flex;gap:6px"><button class="mac-btn mac-btn-sm mac-btn-p" id="mac-w-save">💾 保存</button><button class="mac-btn mac-btn-sm mac-btn-w" id="mac-w-reset">🔄 重置</button></div></div></div><div class="mac-sec"><div class="mac-sec-hd" data-t="mac-w-wi-body">World Info <span class="mac-sec-arr">▶</span></div><div id="mac-w-wi-body" class="mac-sec-bd" style="display:none"><div style="display:flex;gap:6px;margin-bottom:8px"><button class="mac-btn mac-btn-sm mac-btn-s" id="mac-wi-ref">🔄</button><button class="mac-btn mac-btn-sm mac-btn-p" id="mac-wi-en">✓ 启用</button><button class="mac-btn mac-btn-sm mac-btn-s" id="mac-wi-clr">🗑️</button></div><div class="mac-wi-list" id="mac-wi-list"></div><div class="mac-wi-disp" id="mac-wi-disp" style="margin-top:8px">暂无</div></div></div></div>`;
         const ep=`<div class="mac-page" id="mac-page-eval"><div class="mac-metrics" id="mac-e-met"></div><div class="mac-card"><div class="mac-card-t">自动测试</div><div style="display:flex;gap:8px;align-items:center"><label style="font-size:12px;color:var(--txt2)">轮数</label><input type="number" class="mac-input mac-input-sm" id="mac-e-rounds" value="5" min="1" max="30"><button class="mac-btn mac-btn-sm mac-btn-ok" id="mac-e-run">▶ 运行</button><button class="mac-btn mac-btn-sm mac-btn-s" id="mac-e-reset">🔄</button><span id="mac-e-status" style="font-size:12px;color:var(--txt3)">就绪</span></div></div><div class="mac-card"><div class="mac-card-t">测试结果</div><div id="mac-e-results" style="font-size:13px;color:var(--txt2)">暂无</div></div></div>`;
-        const sp=`<div class="mac-page" id="mac-page-settings"><div class="mac-sec"><div class="mac-sec-hd" data-t="mac-s-api-body">API 设置 <span class="mac-sec-arr">▼</span></div><div id="mac-s-api-body" class="mac-sec-bd"><div class="mac-fg"><label class="mac-fl">API 地址 <span class="mac-fh">留空=酒馆API</span></label><input class="mac-input" id="mac-s-url" placeholder="https://..." value="${escA(s.apiUrl)}"></div><div class="mac-fg"><label class="mac-fl">API Key</label><input class="mac-input" id="mac-s-key" type="password" value="${escA(s.apiKey)}"></div><div class="mac-fg"><label class="mac-fl">模型</label><input class="mac-input" id="mac-s-model" value="${escA(s.apiModel)}"></div><div class="mac-fr"><label>Function Calling</label><label class="mac-tog"><input type="checkbox" id="mac-s-fc"${s.useFunctionCalling?' checked':''}><span class="mac-tog-s"></span></label></div><div class="mac-fr"><label>GM Agent</label><label class="mac-tog"><input type="checkbox" id="mac-s-gm"${s.gmEnabled?' checked':''}><span class="mac-tog-s"></span></label></div><div style="display:flex;gap:6px"><button class="mac-btn mac-btn-sm mac-btn-p" id="mac-s-api-save">💾 保存</button><button class="mac-btn mac-btn-sm mac-btn-s" id="mac-s-api-test">🔗 测试</button></div><div class="mac-apir" id="mac-s-api-res"></div></div></div><div class="mac-sec"><div class="mac-sec-hd" data-t="mac-s-game-body">游戏参数 <span class="mac-sec-arr">▶</span></div><div id="mac-s-game-body" class="mac-sec-bd" style="display:none"><div class="mac-fr"><label>最大轮数</label><input class="mac-input mac-input-sm" id="mac-s-rounds" type="number" value="${s.maxRounds}"></div><div class="mac-fr"><label>延迟(ms)</label><input class="mac-input mac-input-sm" id="mac-s-delay" type="number" value="${s.stepDelay}"></div><div class="mac-fr"><label>Agent步数</label><input class="mac-input mac-input-sm" id="mac-s-steps" type="number" value="${s.maxSteps}"></div><div class="mac-fr"><label>LLM超时</label><input class="mac-input mac-input-sm" id="mac-s-timeout" type="number" value="${s.llmTimeout}"></div></div></div><div class="mac-sec"><div class="mac-sec-hd" data-t="mac-s-player-body">玩家设置 <span class="mac-sec-arr">▶</span></div><div id="mac-s-player-body" class="mac-sec-bd" style="display:none"><div class="mac-fr"><label>名称</label><input class="mac-input" id="mac-s-uname" value="${escA(s.userName)}" style="width:150px"></div><div class="mac-fr"><label>头像</label><input class="mac-input mac-input-xs" id="mac-s-uicon" value="${escA(s.userIcon)}"></div></div></div><div class="mac-sec"><div class="mac-sec-hd" data-t="mac-s-prompt-body">Prompt 模板 <span class="mac-sec-arr">▶</span></div><div id="mac-s-prompt-body" class="mac-sec-bd" style="display:none"><div class="mac-fg"><label class="mac-fl">系统提示词</label><textarea class="mac-ta" id="mac-s-sysprompt" rows="3">${esc(pt('systemPrompt'))}</textarea></div><div class="mac-fg"><label class="mac-fl">工具描述</label><textarea class="mac-ta" id="mac-s-toolsdesc" rows="5">${esc(pt('toolsDesc'))}</textarea></div><div class="mac-fg"><label class="mac-fl">输出格式</label><textarea class="mac-ta" id="mac-s-outfmt" rows="2">${esc(pt('outputFormat'))}</textarea></div><div class="mac-fg"><label class="mac-fl">环境叙述</label><textarea class="mac-ta" id="mac-s-envnarr" rows="4">${esc(pt('envNarrations'))}</textarea></div><div style="display:flex;gap:6px"><button class="mac-btn mac-btn-sm mac-btn-p" id="mac-s-pt-save">💾 保存</button><button class="mac-btn mac-btn-sm mac-btn-w" id="mac-s-pt-reset">🔄 默认</button></div></div></div><div class="mac-sec"><div class="mac-sec-hd" data-t="mac-s-save-body">存档管理 <span class="mac-sec-arr">▶</span></div><div id="mac-s-save-body" class="mac-sec-bd" style="display:none">${[1,2,3].map(i=>`<div class="mac-save"><span class="mac-save-l">槽位${i}</span><span class="mac-save-i" id="mac-si-${i}">${getSaveInfo(i)}</span><button class="mac-btn mac-btn-sm mac-btn-s mac-sv" data-slot="${i}">💾</button><button class="mac-btn mac-btn-sm mac-btn-s mac-ld" data-slot="${i}">📂</button></div>`).join('')}</div></div></div>`;
+        const curCh=s.msgChannel||'both';
+        const chHTML=`<div class="mac-fr"><label>消息通道</label><div class="mac-ch-sel" id="mac-s-ch">${[{v:'both',l:'双显'},{v:'fullscreen',l:'仅全屏'},{v:'tavern',l:'仅酒馆'}].map(c=>`<button data-ch="${c.v}"${c.v===curCh?' class="active"':''}>${c.l}</button>`).join('')}</div></div>`;
+        const sp=`<div class="mac-page" id="mac-page-settings"><div class="mac-sec"><div class="mac-sec-hd" data-t="mac-s-api-body">API 设置 <span class="mac-sec-arr">▼</span></div><div id="mac-s-api-body" class="mac-sec-bd"><div class="mac-fg"><label class="mac-fl">API 地址 <span class="mac-fh">留空=酒馆API</span></label><input class="mac-input" id="mac-s-url" placeholder="https://..." value="${escA(s.apiUrl)}"></div><div class="mac-fg"><label class="mac-fl">API Key</label><input class="mac-input" id="mac-s-key" type="password" value="${escA(s.apiKey)}"></div><div class="mac-fg"><label class="mac-fl">模型</label><input class="mac-input" id="mac-s-model" value="${escA(s.apiModel)}"></div><div class="mac-fr"><label>Function Calling</label><label class="mac-tog"><input type="checkbox" id="mac-s-fc"${s.useFunctionCalling?' checked':''}><span class="mac-tog-s"></span></label></div><div class="mac-fr"><label>GM Agent</label><label class="mac-tog"><input type="checkbox" id="mac-s-gm"${s.gmEnabled?' checked':''}><span class="mac-tog-s"></span></label></div>${chHTML}<div style="display:flex;gap:6px"><button class="mac-btn mac-btn-sm mac-btn-p" id="mac-s-api-save">💾 保存</button><button class="mac-btn mac-btn-sm mac-btn-s" id="mac-s-api-test">🔗 测试</button></div><div class="mac-apir" id="mac-s-api-res"></div></div></div><div class="mac-sec"><div class="mac-sec-hd" data-t="mac-s-game-body">游戏参数 <span class="mac-sec-arr">▶</span></div><div id="mac-s-game-body" class="mac-sec-bd" style="display:none"><div class="mac-fr"><label>最大轮数</label><input class="mac-input mac-input-sm" id="mac-s-rounds" type="number" value="${s.maxRounds}"></div><div class="mac-fr"><label>延迟(ms)</label><input class="mac-input mac-input-sm" id="mac-s-delay" type="number" value="${s.stepDelay}"></div><div class="mac-fr"><label>Agent步数</label><input class="mac-input mac-input-sm" id="mac-s-steps" type="number" value="${s.maxSteps}"></div><div class="mac-fr"><label>LLM超时</label><input class="mac-input mac-input-sm" id="mac-s-timeout" type="number" value="${s.llmTimeout}"></div></div></div><div class="mac-sec"><div class="mac-sec-hd" data-t="mac-s-player-body">玩家设置 <span class="mac-sec-arr">▶</span></div><div id="mac-s-player-body" class="mac-sec-bd" style="display:none"><div class="mac-fr"><label>名称</label><input class="mac-input" id="mac-s-uname" value="${escA(s.userName)}" style="width:150px"></div><div class="mac-fr"><label>头像</label><input class="mac-input mac-input-xs" id="mac-s-uicon" value="${escA(s.userIcon)}"></div></div></div><div class="mac-sec"><div class="mac-sec-hd" data-t="mac-s-prompt-body">Prompt 模板 <span class="mac-sec-arr">▶</span></div><div id="mac-s-prompt-body" class="mac-sec-bd" style="display:none"><div class="mac-fg"><label class="mac-fl">系统提示词</label><textarea class="mac-ta" id="mac-s-sysprompt" rows="3">${esc(pt('systemPrompt'))}</textarea></div><div class="mac-fg"><label class="mac-fl">工具描述</label><textarea class="mac-ta" id="mac-s-toolsdesc" rows="5">${esc(pt('toolsDesc'))}</textarea></div><div class="mac-fg"><label class="mac-fl">输出格式</label><textarea class="mac-ta" id="mac-s-outfmt" rows="2">${esc(pt('outputFormat'))}</textarea></div><div class="mac-fg"><label class="mac-fl">环境叙述</label><textarea class="mac-ta" id="mac-s-envnarr" rows="4">${esc(pt('envNarrations'))}</textarea></div><div style="display:flex;gap:6px"><button class="mac-btn mac-btn-sm mac-btn-p" id="mac-s-pt-save">💾 保存</button><button class="mac-btn mac-btn-sm mac-btn-w" id="mac-s-pt-reset">🔄 默认</button></div></div></div><div class="mac-sec"><div class="mac-sec-hd" data-t="mac-s-save-body">存档管理 <span class="mac-sec-arr">▶</span></div><div id="mac-s-save-body" class="mac-sec-bd" style="display:none">${[1,2,3].map(i=>`<div class="mac-save"><span class="mac-save-l">槽位${i}</span><span class="mac-save-i" id="mac-si-${i}">${getSaveInfo(i)}</span><button class="mac-btn mac-btn-sm mac-btn-s mac-sv" data-slot="${i}">💾</button><button class="mac-btn mac-btn-sm mac-btn-s mac-ld" data-slot="${i}">📂</button></div>`).join('')}</div></div></div>`;
         const lp=`<div class="mac-page" id="mac-page-logs"><div style="display:flex;align-items:center;gap:6px;margin-bottom:8px"><span style="font-size:12px;color:var(--txt3)">最近 200 条</span><button class="mac-btn mac-btn-sm mac-btn-s" id="mac-l-clear" style="margin-left:auto">🗑️</button></div><div class="mac-logbox" id="mac-l-box"></div></div>`;
         const app=document.createElement('div');app.id='mac-app';app.innerHTML=`${sb}<div id="mac-main">${hd}<div id="mac-content">${dp}${gp}${ap}${wp}${ep}${sp}${lp}</div></div>`;document.body.appendChild(app);
-        const mini=document.createElement('div');mini.id='mac-mini-hud';mini.innerHTML='<span class="mini-dot" id="mac-mini-dot"></span><span id="mac-mini-text">Multi-Agent v5.1</span>';document.body.appendChild(mini);
+        const mini=document.createElement('div');mini.id='mac-mini-hud';mini.innerHTML=`<span class="mini-dot" id="mac-mini-dot"></span><span id="mac-mini-text">Multi-Agent v${VERSION}</span>`;document.body.appendChild(mini);
         bindAllEvents();renderAgentConfigs();renderScenarios();updateAll();renderLogs();updateEval();
     }
 
-    // ── Floating HUD ──
+    // ── Floating HUD (with persistence) ──
 
     function createHUD(){
         if(document.getElementById('mac-hud'))return;
         const h=document.createElement('div');h.id='mac-hud';
         h.innerHTML=`<div id="mac-hud-drag"><span id="mac-hud-title">${IC.logo} Multi-Agent</span><span id="mac-hud-round">R0</span><button id="mac-hud-toggle" title="收起">−</button></div><div id="mac-hud-body"><div id="mac-hud-agents"></div><div id="mac-hud-user-sec" class="mac-hud-user-section" style="display:none"><div class="mac-hud-input-wrap"><input id="mac-hud-input" type="text" class="mac-hud-input" placeholder="等待中…" disabled><button id="mac-hud-send" class="mac-hud-send" disabled>➤</button></div></div><div id="mac-hud-status">未初始化</div><div id="mac-hud-btns"><button class="mac-hud-btn" id="mac-hud-init" title="初始化">⟳</button><button class="mac-hud-btn" id="mac-hud-start" disabled title="开始">▶</button><button class="mac-hud-btn" id="mac-hud-pause" disabled title="暂停">⏸</button><button class="mac-hud-btn" id="mac-hud-stop" disabled title="停止">⏹</button></div></div>`;
         document.body.appendChild(h);
+
+        const saved=loadHudState();
+        if(saved.left!==undefined){h.style.left=saved.left+'px';h.style.top=saved.top+'px';h.style.right='auto';h.style.bottom='auto';}
+        if(saved.collapsed){const b=document.getElementById('mac-hud-body');if(b)b.style.display='none';const btn=document.getElementById('mac-hud-toggle');if(btn)btn.textContent='+';}
+
         makeDraggable(h,document.getElementById('mac-hud-drag'));
-        document.getElementById('mac-hud-toggle').addEventListener('click',()=>{const b=document.getElementById('mac-hud-body');const btn=document.getElementById('mac-hud-toggle');const v=b.style.display==='none';b.style.display=v?'':'none';btn.textContent=v?'−':'+';});
+        document.getElementById('mac-hud-toggle').addEventListener('click',()=>{const b=document.getElementById('mac-hud-body');const btn=document.getElementById('mac-hud-toggle');const v=b.style.display==='none';b.style.display=v?'':'none';btn.textContent=v?'−':'+';saveHudState({collapsed:!v});});
         document.getElementById('mac-hud-init').addEventListener('click',doInit);
         document.getElementById('mac-hud-start').addEventListener('click',doStart);
         document.getElementById('mac-hud-pause').addEventListener('click',doPause);
@@ -242,7 +408,12 @@
         document.getElementById('mac-hud-input').addEventListener('keydown',e=>{if(e.key==='Enter')submitUserAction();});
     }
 
-    function makeDraggable(el,handle){let drag=false,ox=0,oy=0;handle.style.cursor='grab';handle.addEventListener('mousedown',e=>{if(e.target.tagName==='BUTTON')return;drag=true;ox=e.clientX-el.offsetLeft;oy=e.clientY-el.offsetTop;handle.style.cursor='grabbing';e.preventDefault();});document.addEventListener('mousemove',e=>{if(!drag)return;el.style.left=Math.max(0,Math.min(window.innerWidth-el.offsetWidth,e.clientX-ox))+'px';el.style.top=Math.max(0,Math.min(window.innerHeight-el.offsetHeight,e.clientY-oy))+'px';el.style.right='auto';el.style.bottom='auto';});document.addEventListener('mouseup',()=>{drag=false;handle.style.cursor='grab';});}
+    function makeDraggable(el,handle){
+        let drag=false,ox=0,oy=0;handle.style.cursor='grab';
+        handle.addEventListener('mousedown',e=>{if(e.target.tagName==='BUTTON')return;drag=true;ox=e.clientX-el.offsetLeft;oy=e.clientY-el.offsetTop;handle.style.cursor='grabbing';e.preventDefault();});
+        document.addEventListener('mousemove',e=>{if(!drag)return;const nx=Math.max(0,Math.min(window.innerWidth-el.offsetWidth,e.clientX-ox));const ny=Math.max(0,Math.min(window.innerHeight-el.offsetHeight,e.clientY-oy));el.style.left=nx+'px';el.style.top=ny+'px';el.style.right='auto';el.style.bottom='auto';});
+        document.addEventListener('mouseup',()=>{if(!drag)return;drag=false;handle.style.cursor='grab';saveHudState({left:el.offsetLeft,top:el.offsetTop});});
+    }
 
     function ensureChatBar(){
         if(document.getElementById('mac-chat-bar'))return;
@@ -264,30 +435,28 @@
         ['mac-hud-stop'].forEach(id=>{const e=document.getElementById(id);if(e)e.disabled=!G.running;});
     }
 
-    // ── Common updates ──
-
     function updateAll(){updateDashboard();updateHUD();ensureChatBar();
         const md=document.getElementById('mac-mini-dot'),mt=document.getElementById('mac-mini-text');
-        if(md)md.className=`mini-dot${G.running?' on':''}`;if(mt)mt.textContent=G.running?`R${G.round} ${G.waitingForUser?'等待行动':'运行中'}`:'Multi-Agent v5.1';
+        if(md)md.className=`mini-dot${G.running?' on':''}`;if(mt)mt.textContent=G.running?`R${G.round} ${G.waitingForUser?'等待行动':'运行中'}`:`Multi-Agent v${VERSION}`;
     }
     function updateDashboard(){
         const m=getMetrics(),set=(id,v)=>{const e=document.getElementById(id);if(e)e.textContent=v;};
         set('mac-d-rounds',G.round);set('mac-d-llm',m.llmCalls);set('mac-d-tools',m.toolCalls);set('mac-d-fc',m.fcRate>0?m.fcRate+'%':'—');
-        set('mac-d-status',!G.inited?'未初始化':!G.running?'已停止':G.waitingForUser?'等待行动':G.paused?'已暂停':`运行中`);
+        set('mac-d-status',!G.inited?'未初始化':!G.running?'已停止':G.waitingForUser?'等待行动':G.paused?'已暂停':'运行中');
         const sEl=document.getElementById('mac-d-status');if(sEl)sEl.className='mac-badge '+(!G.inited?'mac-badge-r':!G.running?'mac-badge-y':G.waitingForUser?'mac-badge-b':G.paused?'mac-badge-y':'mac-badge-g');
         ['mac-d-init'].forEach(id=>{const e=document.getElementById(id);if(e)e.disabled=G.running;});
         ['mac-d-start'].forEach(id=>{const e=document.getElementById(id);if(e)e.disabled=!G.inited||G.running;});
         ['mac-d-pause'].forEach(id=>{const e=document.getElementById(id);if(e)e.disabled=!G.running;});
         ['mac-d-stop'].forEach(id=>{const e=document.getElementById(id);if(e)e.disabled=!G.running;});
         const agEl=document.getElementById('mac-d-agents');
-        if(agEl){const all=[...(G.userAgent?[G.userAgent]:[]),...G.agents];agEl.innerHTML=all.map(a=>{const pct=a.maxHp>0?Math.round(a.hp/a.maxHp*100):0;const loc=G.world?.locations?.[a.location]?.name||a.location||'?';const bg=pct>50?'#7ec89a':pct>25?'#dbb866':'#d47070';return`<div class="mac-ag-card"><div class="mac-ag-head"><span class="mac-ag-icon">${a.icon}</span><span class="mac-ag-name">${a.name}</span><span class="mac-ag-role">${a.role}</span></div><div class="mac-hp"><div class="mac-hp-fill" style="width:${pct}%;background:${bg}"></div></div><div class="mac-ag-info">${loc} · HP ${a.hp}/${a.maxHp} · 💰${a.gold}</div></div>`;}).join('');}
+        if(agEl){const all=[...(G.userAgent?[G.userAgent]:[]),...G.agents];agEl.innerHTML=all.map(a=>{const pct=a.maxHp>0?Math.round(a.hp/a.maxHp*100):0;const loc=G.world?.locations?.[a.location]?.name||a.location||'?';const bg=pct>50?'#7ec89a':pct>25?'#dbb866':'#d47070';return`<div class="mac-ag-card"><div class="mac-ag-head"><span class="mac-ag-icon">${a.icon}</span><span class="mac-ag-name">${a.name}</span><span class="mac-ag-role">${a.role}</span></div><div class="mac-hp"><div class="mac-hp-fill" style="width:${pct}%;background:${bg}"></div></div><div class="mac-ag-info">${loc} · HP ${a.hp}/${a.maxHp} · ATK ${a.atk||20} · 💰${a.gold}</div></div>`;}).join('');}
         const rEl=document.getElementById('mac-d-recent');if(rEl){const rec=G.actionsHistory.slice(-8).reverse();rEl.innerHTML=rec.length?rec.map(h=>`<div style="padding:3px 0;border-bottom:1px solid rgba(195,155,60,.06)">[R${h.round}] ${h.agentName}: <span style="color:${TC[h.tool]||'#6a6258'}">${TL[h.tool]||h.tool}</span> → ${esc((h.observation||'').substring(0,60))}</div>`).join(''):'暂无';}
     }
 
     function navigateTo(page){G.currentPage=page;document.querySelectorAll('.mac-page').forEach(e=>e.classList.remove('active'));document.querySelectorAll('.mac-nav').forEach(e=>e.classList.remove('active'));const pEl=document.getElementById(`mac-page-${page}`),nEl=document.querySelector(`.mac-nav[data-page="${page}"]`);if(pEl)pEl.classList.add('active');if(nEl){nEl.classList.add('active');const b=nEl.querySelector('.mac-nav-badge');if(b)b.style.display='none';}const titles={dashboard:'仪表盘',game:'游戏',agents:'智能体配置',world:'世界编辑',eval:'评估系统',settings:'设置',logs:'系统日志'};const tEl=document.getElementById('mac-header-title');if(tEl)tEl.textContent=titles[page]||page;if(page==='game'){const c=document.getElementById('mac-game-chat');if(c)c.scrollTop=c.scrollHeight;}if(page==='eval')updateEval();if(page==='logs')renderLogs();}
     function toggleApp(){const a=document.getElementById('mac-app'),m=document.getElementById('mac-mini-hud');if(!a)return;const show=!a.classList.contains('visible');a.classList.toggle('visible',show);if(m)m.style.display=show?'none':'flex';const b=document.getElementById('mac-topbar-btn');if(b)b.classList.toggle('active',show);}
 
-    function renderAgentConfigs(){const el=document.getElementById('mac-a-list');if(!el)return;const s=cfg();el.innerHTML=s.agents.map((a,i)=>`<div class="mac-acfg"><div class="mac-acfg-hd"><input class="mac-input mac-input-xs mac-ai" value="${escA(a.icon)}" data-i="${i}"><input class="mac-input mac-an" value="${escA(a.name)}" placeholder="名称" data-i="${i}" style="flex:1"><input class="mac-input mac-ar" value="${escA(a.role)}" placeholder="角色" data-i="${i}" style="width:80px"><button class="mac-btn-ico mac-adel" data-i="${i}">🗑️</button></div><textarea class="mac-ta mac-ap" rows="3" data-i="${i}" placeholder="角色提示词…">${esc(a.prompt)}</textarea></div>`).join('');el.querySelectorAll('.mac-adel').forEach(b=>b.addEventListener('click',()=>{const i=parseInt(b.dataset.i);if(s.agents.length<=1)return;if(confirm(`删除"${s.agents[i].name}"？`)){s.agents.splice(i,1);saveCfg();renderAgentConfigs();}}));}
+    function renderAgentConfigs(){const el=document.getElementById('mac-a-list');if(!el)return;const s=cfg();el.innerHTML=s.agents.map((a,i)=>`<div class="mac-acfg"><div class="mac-acfg-hd"><input class="mac-input mac-input-xs mac-ai" value="${escA(a.icon)}" data-i="${i}"><input class="mac-input mac-an" value="${escA(a.name)}" placeholder="名称" data-i="${i}" style="flex:1"><input class="mac-input mac-ar" value="${escA(a.role)}" placeholder="角色" data-i="${i}" style="width:80px"><button class="mac-btn-ico mac-adel" data-i="${i}">🗑️</button></div><div style="display:flex;gap:6px;margin-bottom:6px"><label style="font-size:11px;color:var(--txt3)">ATK</label><input class="mac-input mac-input-xs mac-aatk" value="${a.atk||20}" data-i="${i}"><label style="font-size:11px;color:var(--txt3)">DEF</label><input class="mac-input mac-input-xs mac-adef" value="${a.def||0}" data-i="${i}"></div><textarea class="mac-ta mac-ap" rows="3" data-i="${i}" placeholder="角色提示词…">${esc(a.prompt)}</textarea></div>`).join('');el.querySelectorAll('.mac-adel').forEach(b=>b.addEventListener('click',()=>{const i=parseInt(b.dataset.i);if(s.agents.length<=1)return;if(confirm(`删除"${s.agents[i].name}"？`)){s.agents.splice(i,1);saveCfg();renderAgentConfigs();}}));}
     function renderScenarios(){const el=document.getElementById('mac-w-scn');if(!el)return;const cur=cfg().scenario||'rpg';el.innerHTML=Object.entries(SCENARIOS).map(([id,sc])=>`<div class="mac-scn${id===cur?' sel':''}" data-sc="${id}"><div class="mac-scn-ico">${sc.icon}</div><div class="mac-scn-nm">${sc.name}</div><div class="mac-scn-ds">${sc.desc}</div></div>`).join('');el.querySelectorAll('.mac-scn').forEach(c=>c.addEventListener('click',()=>{const s=cfg();s.scenario=c.dataset.sc;s.agents=JSON.parse(JSON.stringify(SCENARIOS[s.scenario].agents));s.promptTemplates=s.promptTemplates||{};s.promptTemplates.worldTpl=JSON.stringify(SCENARIOS[s.scenario].world,null,2);saveCfg();renderScenarios();renderAgentConfigs();const t=document.getElementById('mac-w-tpl');if(t)t.value=s.promptTemplates.worldTpl;}));const t=document.getElementById('mac-w-tpl');if(t)t.value=cfg().promptTemplates?.worldTpl||JSON.stringify(getScenario().world,null,2);}
     function renderLogs(){const el=document.getElementById('mac-l-box');if(!el)return;el.innerHTML=LOG.slice(-200).map(e=>`<div class="mac-log-e mac-log-${e.level}">[${e.ts}] ${esc(e.msg)}</div>`).join('');el.scrollTop=el.scrollHeight;}
     function updateEval(){const el=document.getElementById('mac-e-met');if(!el)return;const m=getMetrics();el.innerHTML=[{l:'回合',v:m.rounds,c:'var(--txt)'},{l:'LLM',v:m.llmCalls,c:'var(--gold-l)'},{l:'工具',v:m.toolCalls,c:'var(--ok)'},{l:'FC',v:m.fcCalls,c:'#b08ee6'},{l:'文本',v:m.textCalls,c:'var(--warn)'},{l:'FC率',v:m.fcRate+'%',c:'var(--ok)'},{l:'均响应',v:m.avgMs+'ms',c:'var(--gold-l)'},{l:'错误',v:m.errors,c:'var(--err)'},{l:'胜',v:m.successes,c:'var(--ok)'},{l:'败',v:m.failures,c:'var(--err)'}].map(x=>`<div class="mac-metric"><div class="mac-metric-v" style="color:${x.c}">${x.v}</div><div class="mac-metric-l">${x.l}</div></div>`).join('');}
@@ -306,15 +475,16 @@
         document.getElementById('mac-d-stop')?.addEventListener('click',doStop);
         document.getElementById('mac-g-send')?.addEventListener('click',submitUserAction);
         document.getElementById('mac-g-input')?.addEventListener('keydown',e=>{if(e.key==='Enter')submitUserAction();});
-        document.getElementById('mac-a-add')?.addEventListener('click',()=>{const s=cfg();s.agents.push({id:`agent_${Date.now()}`,name:`角色${s.agents.length+1}`,icon:'🤖',role:'冒险者',hp:100,maxHp:100,location:Object.keys(getScenario().world.locations)[0],inventory:[],gold:0,priority:s.agents.length+1,prompt:''});saveCfg();renderAgentConfigs();});
-        document.getElementById('mac-a-save')?.addEventListener('click',()=>{const s=cfg();document.querySelectorAll('.mac-ai').forEach((el,i)=>{if(!s.agents[i])return;s.agents[i].icon=el.value.trim()||'🤖';s.agents[i].name=document.querySelectorAll('.mac-an')[i]?.value.trim()||`角色${i+1}`;s.agents[i].role=document.querySelectorAll('.mac-ar')[i]?.value.trim()||'冒险者';s.agents[i].prompt=document.querySelectorAll('.mac-ap')[i]?.value.trim()||'';s.agents[i].id=s.agents[i].id||'a_'+i;s.agents[i].maxHp=s.agents[i].maxHp||100;s.agents[i].priority=i+1;});saveCfg();addLog('角色已保存');});
-        document.getElementById('mac-w-save')?.addEventListener('click',()=>{const s=cfg();s.promptTemplates=s.promptTemplates||{};s.promptTemplates.worldTpl=document.getElementById('mac-w-tpl')?.value||'';saveCfg();});
+        document.getElementById('mac-a-add')?.addEventListener('click',()=>{const s=cfg();s.agents.push({id:`agent_${Date.now()}`,name:`角色${s.agents.length+1}`,icon:'🤖',role:'冒险者',hp:100,maxHp:100,atk:20,def:0,bonuses:{},location:Object.keys(getScenario().world.locations)[0],inventory:[],gold:0,priority:s.agents.length+1,prompt:''});saveCfg();renderAgentConfigs();});
+        document.getElementById('mac-a-save')?.addEventListener('click',()=>{const s=cfg();document.querySelectorAll('.mac-ai').forEach((el,i)=>{if(!s.agents[i])return;s.agents[i].icon=el.value.trim()||'🤖';s.agents[i].name=document.querySelectorAll('.mac-an')[i]?.value.trim()||`角色${i+1}`;s.agents[i].role=document.querySelectorAll('.mac-ar')[i]?.value.trim()||'冒险者';s.agents[i].atk=parseInt(document.querySelectorAll('.mac-aatk')[i]?.value)||20;s.agents[i].def=parseInt(document.querySelectorAll('.mac-adef')[i]?.value)||0;s.agents[i].prompt=document.querySelectorAll('.mac-ap')[i]?.value.trim()||'';s.agents[i].id=s.agents[i].id||'a_'+i;s.agents[i].maxHp=s.agents[i].maxHp||100;s.agents[i].priority=i+1;});saveCfg();addLog('角色已保存');});
+        document.getElementById('mac-w-save')?.addEventListener('click',()=>{const s=cfg();s.promptTemplates=s.promptTemplates||{};s.promptTemplates.worldTpl=document.getElementById('mac-w-tpl')?.value||'';saveCfg();addLog('世界模板已保存（下次初始化生效）');});
         document.getElementById('mac-w-reset')?.addEventListener('click',()=>{const t=JSON.stringify(getScenario().world,null,2);const e=document.getElementById('mac-w-tpl');if(e)e.value=t;const s=cfg();s.promptTemplates=s.promptTemplates||{};s.promptTemplates.worldTpl=t;saveCfg();});
         document.getElementById('mac-wi-ref')?.addEventListener('click',renderWIList);
         document.getElementById('mac-wi-en')?.addEventListener('click',async()=>{const ch=[...document.querySelectorAll('.mac-wic:checked')].map(e=>e.value);if(!ch.length)return;const s=cfg();s.worldInfoSelected=ch;const ts=[];for(const n of ch){const t=await loadSTWorldInfoFile(n);if(t)ts.push(t);}s.worldInfo=ts.join('\n---\n').substring(0,2000);saveCfg();const d=document.getElementById('mac-wi-disp');if(d)d.textContent=s.worldInfo.substring(0,500);});
         document.getElementById('mac-wi-clr')?.addEventListener('click',()=>{const s=cfg();s.worldInfo='';s.worldInfoSelected=[];saveCfg();document.querySelectorAll('.mac-wic').forEach(e=>e.checked=false);const d=document.getElementById('mac-wi-disp');if(d)d.textContent='暂无';});
-        document.getElementById('mac-s-api-save')?.addEventListener('click',()=>{const s=cfg();s.apiUrl=document.getElementById('mac-s-url')?.value.trim()||'';s.apiKey=document.getElementById('mac-s-key')?.value.trim()||'';s.apiModel=document.getElementById('mac-s-model')?.value.trim()||'gpt-4o-mini';s.useFunctionCalling=document.getElementById('mac-s-fc')?.checked??true;s.gmEnabled=document.getElementById('mac-s-gm')?.checked??true;G.gmEnabled=s.gmEnabled;saveCfg();});
-        document.getElementById('mac-s-api-test')?.addEventListener('click',async()=>{const url=document.getElementById('mac-s-url')?.value.trim(),key=document.getElementById('mac-s-key')?.value.trim(),model=document.getElementById('mac-s-model')?.value.trim()||'gpt-4o-mini',res=document.getElementById('mac-s-api-res');if(!url){showApi(res,'请填写API地址','err');return;}showApi(res,'⏳ 测试中…','info');try{const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json',...(key?{Authorization:`Bearer ${key}`}:{})},body:JSON.stringify({model,messages:[{role:'user',content:'Hi'}],max_tokens:5})});showApi(res,r.ok?'✅ 成功！':`❌ ${r.status}`,r.ok?'ok':'err');}catch(e){showApi(res,`❌ ${e.message}`,'err');}});
+        document.getElementById('mac-s-api-save')?.addEventListener('click',()=>{const s=cfg();s.apiUrl=document.getElementById('mac-s-url')?.value.trim()||'';s.apiKey=document.getElementById('mac-s-key')?.value.trim()||'';s.apiModel=document.getElementById('mac-s-model')?.value.trim()||'gpt-4o-mini';s.useFunctionCalling=document.getElementById('mac-s-fc')?.checked??true;s.gmEnabled=document.getElementById('mac-s-gm')?.checked??true;G.gmEnabled=s.gmEnabled;saveCfg();addLog('API 设置已保存');});
+        document.getElementById('mac-s-api-test')?.addEventListener('click',async()=>{const url=document.getElementById('mac-s-url')?.value.trim(),key=document.getElementById('mac-s-key')?.value.trim(),model=document.getElementById('mac-s-model')?.value.trim()||'gpt-4o-mini',res=document.getElementById('mac-s-api-res');if(!url){showApi(res,'请填写API地址','err');return;}showApi(res,'⏳ 测试中…','info');try{const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json',...(key?{Authorization:`Bearer ${key}`}:{})},body:JSON.stringify({model,messages:[{role:'user',content:'Hi'}],max_tokens:5})});showApi(res,r.ok?'✅ 连接成功！':friendlyError(r.status),r.ok?'ok':'err');}catch(e){showApi(res,e.name==='TypeError'?'❌ 网络错误：无法连接到该地址，请检查URL':`❌ ${e.message}`,'err');}});
+        document.getElementById('mac-s-ch')?.querySelectorAll('button').forEach(b=>b.addEventListener('click',()=>{document.querySelectorAll('#mac-s-ch button').forEach(x=>x.classList.remove('active'));b.classList.add('active');const s=cfg();s.msgChannel=b.dataset.ch;saveCfg();addLog(`消息通道: ${b.textContent}`);}));
         ['mac-s-rounds','mac-s-delay','mac-s-steps','mac-s-timeout'].forEach(id=>{document.getElementById(id)?.addEventListener('change',function(){const s=cfg(),mp={'mac-s-rounds':'maxRounds','mac-s-delay':'stepDelay','mac-s-steps':'maxSteps','mac-s-timeout':'llmTimeout'};s[mp[id]]=parseInt(this.value)||s[mp[id]];saveCfg();});});
         document.getElementById('mac-s-pt-save')?.addEventListener('click',()=>{const s=cfg(),t=s.promptTemplates||{};t.systemPrompt=document.getElementById('mac-s-sysprompt')?.value||t.systemPrompt;t.toolsDesc=document.getElementById('mac-s-toolsdesc')?.value||t.toolsDesc;t.outputFormat=document.getElementById('mac-s-outfmt')?.value||t.outputFormat;t.envNarrations=document.getElementById('mac-s-envnarr')?.value||t.envNarrations;s.promptTemplates=t;saveCfg();});
         document.getElementById('mac-s-pt-reset')?.addEventListener('click',()=>{if(!confirm('恢复默认？'))return;cfg().promptTemplates={...DEFAULT_PROMPTS};saveCfg();const sv=(id,k)=>{const e=document.getElementById(id);if(e)e.value=pt(k);};sv('mac-s-sysprompt','systemPrompt');sv('mac-s-toolsdesc','toolsDesc');sv('mac-s-outfmt','outputFormat');sv('mac-s-envnarr','envNarrations');});
@@ -324,15 +494,52 @@
         document.getElementById('mac-e-reset')?.addEventListener('click',resetMetrics);
         document.getElementById('mac-l-clear')?.addEventListener('click',()=>{LOG=[];renderLogs();});
         document.querySelectorAll('.mac-sec-hd').forEach(hd=>{hd.addEventListener('click',()=>{const t=document.getElementById(hd.dataset.t);const a=hd.querySelector('.mac-sec-arr');if(!t)return;const o=t.style.display!=='none';t.style.display=o?'none':'block';if(a)a.textContent=o?'▶':'▼';});});
+        document.addEventListener('keydown',e=>{if(e.key==='Escape'){const a=document.getElementById('mac-app');if(a&&a.classList.contains('visible'))toggleApp();}});
     }
     function showApi(el,text,type){if(!el)return;el.textContent=text;el.className=`mac-apir mac-apir-${type}`;el.style.display='block';}
 
     // ══════════════════════════════════════════════════════════════
-    //  PART 9 — 启动
+    //  PART 9 — 启动（MutationObserver）
     // ══════════════════════════════════════════════════════════════
     let initDone=false;
     function injectTopBar(){if(document.getElementById('mac-topbar-btn'))return true;const sels=['#top-settings-holder','#topBar','#top-bar','.drag-grabber'];let c=null;for(const s of sels){c=document.querySelector(s);if(c)break;}if(!c)return false;const b=document.createElement('div');b.id='mac-topbar-btn';b.title='多智能体协作系统';b.innerHTML=IC.logo;b.addEventListener('click',toggleApp);c.appendChild(b);return true;}
-    function initOnce(){if(initDone)return;try{if(!document.getElementById('mac-app'))createFullScreenApp();if(!document.getElementById('mac-hud'))createHUD();injectTopBar();initDone=true;addLog(`v${VERSION} 初始化完成`);console.log(`[MultiAgent v${VERSION}] ✓`);}catch(e){console.error('[MultiAgent]',e);}}
-    function boot(){console.log(`[MultiAgent v${VERSION}] loading…`);try{const ctx=typeof SillyTavern!=='undefined'&&SillyTavern.getContext?SillyTavern.getContext():null;if(ctx?.eventSource){const et=ctx.event_types||{};const go=()=>setTimeout(initOnce,0);ctx.eventSource.on(et.APP_READY||'app_ready',go);if(et.APP_INITIALIZED)ctx.eventSource.on(et.APP_INITIALIZED,go);if(et.EXTENSION_SETTINGS_LOADED)ctx.eventSource.on(et.EXTENSION_SETTINGS_LOADED,go);}}catch(e){console.error('[MultiAgent] events:',e);}setTimeout(initOnce,0);setTimeout(initOnce,300);setTimeout(initOnce,1200);setTimeout(initOnce,3000);}
+
+    function initOnce(){
+        if(initDone)return;
+        try{
+            if(!document.getElementById('mac-app'))createFullScreenApp();
+            if(!document.getElementById('mac-hud'))createHUD();
+            injectTopBar();
+            initDone=true;
+            addLog(`v${VERSION} 初始化完成`);
+            console.log(`[MultiAgent v${VERSION}] ready`);
+        }catch(e){console.error('[MultiAgent]',e);}
+    }
+
+    function boot(){
+        console.log(`[MultiAgent v${VERSION}] loading…`);
+        try{
+            const ctx=typeof SillyTavern!=='undefined'&&SillyTavern.getContext?SillyTavern.getContext():null;
+            if(ctx?.eventSource){
+                const et=ctx.event_types||{};
+                const go=()=>setTimeout(initOnce,0);
+                ctx.eventSource.on(et.APP_READY||'app_ready',go);
+                if(et.APP_INITIALIZED)ctx.eventSource.on(et.APP_INITIALIZED,go);
+                if(et.EXTENSION_SETTINGS_LOADED)ctx.eventSource.on(et.EXTENSION_SETTINGS_LOADED,go);
+            }
+        }catch(e){console.error('[MultiAgent] events:',e);}
+
+        const obs = new MutationObserver(()=>{
+            if(initDone){obs.disconnect();return;}
+            if(document.getElementById('top-settings-holder')||document.getElementById('topBar')||document.querySelector('.drag-grabber')){
+                obs.disconnect();
+                initOnce();
+            }
+        });
+        obs.observe(document.body,{childList:true,subtree:true});
+
+        setTimeout(initOnce,500);
+        setTimeout(initOnce,2000);
+    }
     boot();
 })();
