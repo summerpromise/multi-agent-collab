@@ -1,1579 +1,350 @@
 /**
- * 多智能体协作系统 v4.0 - SillyTavern UI Extension
+ * 多智能体协作系统 v5.2 — 世界模板同步 · 中止请求 · 消息通道 · HUD 记忆
  *
- * 五层架构：
- *  层一 数据持久层  —— extensionSettings 配置 + localStorage 存档
- *  层二 游戏引擎层  —— 世界状态、工具执行、胜负判定
- *  层三 执行引擎层  —— ReAct 循环（逐步）、Prompt 构建、LLM 调用、目标检测、失败降级、超时熔断
- *  层四 Agent协调层 —— Round-Robin 调度、消息队列、事件广播、环境回合
- *  层五 前端交互层  —— 悬浮 HUD、聊天气泡注入、扩展面板、按钮事件
+ * 0 常量 · SVG图标 · Function Calling 工具定义
+ * 1 场景模板
+ * 2 状态管理 & 配置持久层
+ * 3 游戏引擎
+ * 4 LLM 层（FC + ReAct 双模式）
+ * 5 Agent 执行引擎
+ * 6 协调层（游戏循环）
+ * 7 评估系统
+ * 8 UI（全屏仪表盘 + 浮动HUD + 酒馆聊天注入）
+ * 9 启动
  */
-
 (function () {
     'use strict';
 
-    const MODULE  = 'multi_agent_collab';
-    const SAVE_KEY = 'mac_game_save';
+    // ══════════════════════════════════════════════════════════════
+    //  PART 0 — 常量 · SVG图标 · FC工具定义
+    // ══════════════════════════════════════════════════════════════
 
-    // ──────────────────────────────────────────────────────────
-    //  全局常量：世界模板 & Agent 模板
-    // ──────────────────────────────────────────────────────────
+    const MODULE = 'multi_agent_collab', VERSION = '5.2.0', SAVE_KEY = 'mac_game_save', HUD_LAYOUT_KEY = 'mac_hud_layout';
 
-    const WORLD_TPL = {
-        locations: {
-            village:          { name: '村庄',     desc: '宁静的小村庄，有旅馆和补给。', conn: ['forest', 'dungeon_entrance'], items: ['healing_potion', 'bread'],             enemies: [] },
-            forest:           { name: '迷雾森林', desc: '茂密森林，草药与陷阱并存。',   conn: ['village', 'cave'],            items: ['herbs', 'arrows'],                enemies: ['wolf', 'goblin'] },
-            dungeon_entrance: { name: '地牢入口', desc: '阴冷入口，骷髅把守。',          conn: ['village', 'dungeon_hall'],    items: [],                                 enemies: ['skeleton'] },
-            dungeon_hall:     { name: '地牢大厅', desc: '终点大厅，魔剑与恶魔在此。',   conn: ['dungeon_entrance'],           items: ['magic_sword', 'gold_coin'],       enemies: ['demon', 'vampire'] },
-            cave:             { name: '神秘山洞', desc: '法力充沛，魔法威力翻倍。',      conn: ['forest'],                     items: ['magic_crystal', 'ancient_scroll'], enemies: ['cave_troll'] }
-        },
-        items: {
-            healing_potion: { name: '治疗药水', effect: 'heal',     val: 30 },
-            bread:          { name: '面包',     effect: 'heal',     val: 10 },
-            herbs:          { name: '草药',     effect: 'heal',     val: 15 },
-            arrows:         { name: '箭矢',     effect: 'weapon',   val: 5  },
-            magic_sword:    { name: '魔法剑',   effect: 'weapon',   val: 25 },
-            gold_coin:      { name: '金币',     effect: 'currency', val: 10 },
-            magic_crystal:  { name: '魔法水晶', effect: 'magic',    val: 20 },
-            ancient_scroll: { name: '古老卷轴', effect: 'magic',    val: 30 }
-        },
-        enemies: {
-            wolf:       { name: '灰狼',     hp: 30, maxHp: 30, dmg: 15, reward: 5  },
-            goblin:     { name: '哥布林',   hp: 25, maxHp: 25, dmg: 10, reward: 8  },
-            skeleton:   { name: '骷髅',     hp: 40, maxHp: 40, dmg: 18, reward: 12 },
-            demon:      { name: '恶魔',     hp: 60, maxHp: 60, dmg: 25, reward: 20 },
-            vampire:    { name: '吸血鬼',   hp: 50, maxHp: 50, dmg: 22, reward: 18 },
-            cave_troll: { name: '山洞巨魔', hp: 70, maxHp: 70, dmg: 30, reward: 25 }
-        }
+    const IC = {
+        logo: '<svg viewBox="0 0 28 28" fill="none" stroke="currentColor" stroke-width="1.2"><polygon points="14,3 25,9 25,19 14,25 3,19 3,9"/><circle cx="14" cy="14" r="2.5" fill="currentColor" stroke="none" opacity=".5"/><circle cx="14" cy="6" r="1.5" fill="currentColor" stroke="none"/><circle cx="22" cy="11" r="1.5" fill="currentColor" stroke="none"/><circle cx="22" cy="17" r="1.5" fill="currentColor" stroke="none"/><circle cx="14" cy="22" r="1.5" fill="currentColor" stroke="none"/><circle cx="6" cy="17" r="1.5" fill="currentColor" stroke="none"/><circle cx="6" cy="11" r="1.5" fill="currentColor" stroke="none"/></svg>',
+        dash: '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2" y="2" width="6.5" height="6.5" rx="2"/><rect x="11.5" y="2" width="6.5" height="6.5" rx="2"/><rect x="2" y="11.5" width="6.5" height="6.5" rx="2"/><rect x="11.5" y="11.5" width="6.5" height="6.5" rx="2"/></svg>',
+        game: '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="10" cy="10" r="8"/><polygon points="8,5.5 8,14.5 15,10" fill="currentColor" stroke="none" opacity=".7"/></svg>',
+        agents: '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="7.5" cy="6.5" r="2.5"/><path d="M2.5 16c0-2.8 2.2-5 5-5s5 2.2 5 5"/><circle cx="14" cy="5.5" r="2"/><path d="M14 9.5c2.2 0 4 1.8 4 4v2.5"/></svg>',
+        world: '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="10" cy="10" r="8"/><ellipse cx="10" cy="10" rx="3.5" ry="8"/><path d="M2 10h16"/></svg>',
+        eval: '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2.5" y="11" width="3.5" height="6.5" rx="1"/><rect x="8.25" y="6" width="3.5" height="11.5" rx="1"/><rect x="14" y="2.5" width="3.5" height="15" rx="1"/></svg>',
+        settings: '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="10" cy="10" r="2.5"/><path d="M10 2v3M10 15v3M2 10h3M15 10h3M4.2 4.2l2.1 2.1M13.7 13.7l2.1 2.1M4.2 15.8l2.1-2.1M13.7 6.3l2.1-2.1"/></svg>',
+        logs: '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M4 5.5h12M4 10h12M4 14.5h8"/></svg>',
     };
 
-    const ENEMY_HOME = {
-        wolf: 'forest', goblin: 'forest',
-        skeleton: 'dungeon_entrance',
-        cave_troll: 'cave'
-    };
-
-    const AGENTS_TPL = [
-        {
-            id: 'warrior', name: '战士阿强', icon: '⚔️', role: '战士',
-            hp: 100, maxHp: 100, location: 'village', inventory: ['bread'], gold: 10, priority: 1,
-            prompt: '你是战士阿强，勇猛善战，擅长近战与保护队友。你的目标是探索地牢、击败恶魔，保护法师小慧的安全。物理攻击伤害30，持有魔法剑额外+25，战士减伤5点。'
-        },
-        {
-            id: 'mage', name: '法师小慧', icon: '🔮', role: '法师',
-            hp: 70, maxHp: 70, location: 'village', inventory: ['ancient_scroll'], gold: 15, priority: 2,
-            prompt: '你是法师小慧，智慧过人，擅长搜索隐藏物品与魔法攻击。你的目标是收集魔法材料，协助战士阿强击败敌人。魔法攻击伤害20，在神秘山洞内额外+20。'
-        }
+    const FC_TOOLS = [
+        { type: 'function', function: { name: 'move', description: '移动到指定地点', parameters: { type: 'object', properties: { destination: { type: 'string', description: '目标地点ID' } }, required: ['destination'] } } },
+        { type: 'function', function: { name: 'attack', description: '攻击敌人或角色', parameters: { type: 'object', properties: { target: { type: 'string', description: '目标ID' } }, required: ['target'] } } },
+        { type: 'function', function: { name: 'speak', description: '对某人说话', parameters: { type: 'object', properties: { to: { type: 'string', description: '对象ID' }, message: { type: 'string', description: '内容' } }, required: ['to', 'message'] } } },
+        { type: 'function', function: { name: 'search', description: '搜索当前地点', parameters: { type: 'object', properties: {} } } },
+        { type: 'function', function: { name: 'pickup_item', description: '拾取物品', parameters: { type: 'object', properties: { target: { type: 'string', description: '物品ID' } }, required: ['target'] } } },
+        { type: 'function', function: { name: 'use_item', description: '使用背包物品', parameters: { type: 'object', properties: { item: { type: 'string', description: '物品ID' } }, required: ['item'] } } },
+        { type: 'function', function: { name: 'inspect', description: '查看详情', parameters: { type: 'object', properties: { target: { type: 'string', description: '目标ID' } }, required: ['target'] } } },
+        { type: 'function', function: { name: 'rest', description: '休息恢复HP', parameters: { type: 'object', properties: {} } } },
+        { type: 'function', function: { name: 'narrate', description: '叙述/内心独白', parameters: { type: 'object', properties: { text: { type: 'string', description: '叙述内容' } }, required: ['text'] } } },
+        { type: 'function', function: { name: 'complete_turn', description: '结束本回合', parameters: { type: 'object', properties: { summary: { type: 'string', description: '回合总结' } } } } },
+    ];
+    const GM_FC_TOOLS = [
+        { type: 'function', function: { name: 'narrate_event', description: '叙述环境/剧情事件', parameters: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] } } },
+        { type: 'function', function: { name: 'spawn_enemy', description: '在地点生成敌人', parameters: { type: 'object', properties: { enemy_id: { type: 'string' }, location: { type: 'string' } }, required: ['enemy_id', 'location'] } } },
+        { type: 'function', function: { name: 'heal_character', description: '治疗角色', parameters: { type: 'object', properties: { target: { type: 'string' }, amount: { type: 'number' } }, required: ['target', 'amount'] } } },
+        { type: 'function', function: { name: 'damage_character', description: '环境伤害', parameters: { type: 'object', properties: { target: { type: 'string' }, amount: { type: 'number' }, reason: { type: 'string' } }, required: ['target', 'amount'] } } },
     ];
 
-    const DEFAULT_PROMPT_TEMPLATES = {
-        systemPrompt: '你是文字RPG中的自由Agent。THOUGHT 表达你的真实想法与推理；ACTION 可以是自然语言（说话、叙述、反应）或JSON格式的游戏操作。根据人设自由表达，不必拘泥于固定指令。',
-        worldTpl: JSON.stringify(WORLD_TPL, null, 2),
-        toolsDesc: `【可参考的游戏操作】（名称可用中文，如"面包"、"地牢入口"、"骷髅"）
-- move: 移动。params: {"destination":"地点名或ID"}
-- search: 搜索当前地点。params: {}
-- pickup_item: 拾取物品。params: {"target":"物品名或ID"}
-- attack: 攻击敌人。params: {"target":"敌人名或ID"}
-- speak: 对某人说话（自然语言）。params: {"to":"对象名或ID","message":"内容"}
-- narrate: 叙述/反应/内心独白（纯自然语言）。params: {"text":"内容"}
-- inspect: 查看详情。params: {"target":"名或ID"}
-- use_item: 使用物品。params: {"item":"物品名或ID"}
-- rest: 休息。params: {}
-- complete_turn: 结束本回合。params: {"summary":"总结"}
+    const TL = { move:'移动',search:'搜索',pickup_item:'拾取',attack:'攻击',speak:'说话',narrate:'叙述',inspect:'查看',use_item:'使用',rest:'休息',complete_turn:'结束',interact:'交流',narrate_event:'GM叙述',spawn_enemy:'GM生成',heal_character:'GM治疗',damage_character:'GM伤害' };
+    const TC = { move:'#c9a24d',search:'#b08ee6',pickup_item:'#7ec89a',attack:'#d47070',speak:'#dbb866',narrate:'#a09486',inspect:'#8ab4f8',use_item:'#5ec6c6',rest:'#8b8cf8',complete_turn:'#6a6258',interact:'#dbb866',narrate_event:'#b08ee6',spawn_enemy:'#d47070',heal_character:'#7ec89a',damage_character:'#d47070' };
 
-【自由表达】若只想说话、观察、反应，可直接用 speak 或 narrate；也可在 ACTION 中写自然语言，系统会理解意图。`,
-        outputFormat: 'THOUGHT: [你的真实想法、推理、感受，自由表达]\nACTION: [JSON格式如 {"tool":"move","params":{"destination":"地牢入口"}} 或 自然语言如 "对玩家说：小心前面！"]',
-        initRouteA: '村庄 → 迷雾森林 → 神秘山洞',
-        initRouteB: '村庄 → 地牢入口 → 地牢大厅（终点）',
-        initGoal: '击败地牢大厅的恶魔&吸血鬼，取得魔法宝剑！',
-        envNarrations: [
-            '🌧️ 暴雨倾盆，迷雾森林的能见度大幅降低，行动需谨慎。',
-            '🌟 神秘光芒笼罩大地，冒险者们感到精神振奋。',
-            '💨 地牢深处传来恶魔的嘶吼，令人不寒而栗。',
-            '🌙 夜幕降临，不死生物的力量悄然增强。',
-            '☀️ 晨光破晓，冒险者们精神饱满，状态绝佳。',
-            '🍃 山风吹过，草药的香气让人恢复一丝活力。',
-            '🔥 远处天边出现异象，似乎有强大的魔法波动。',
-            '❄️ 寒气从地牢入口涌出，骸骨的碰撞声隐约可闻。'
-        ].join('\n'),
-        goalSuccess: '地牢大厅已清空，任务完成！',
-        goalFail: 'HP为0，无法继续',
-        envTurnLabel: '环境变化',
-        envCalm: '风平浪静，无明显变化。',
-        roundHistoryLabel: '其他Agent近期行动',
-        observationLabel: '本回合已执行历史（Observation）',
-        teammateMsgLabel: '队友来信（请优先回应）',
-        teammateLabel: '队友',
-        userLabel: '玩家（主角，你需协助）',
-        userActionLabel: '玩家行动',
-        userIntentPrompt: '意图理解：理解用户自然语言，输出JSON。攻击目标可为敌人或同地点NPC。支持模糊表达。',
-        waitForUserHint: '输入你的行动（自然语言）'
+    // ══════════════════════════════════════════════════════════════
+    //  PART 1 — 场景模板（与 v5.0 相同）
+    // ══════════════════════════════════════════════════════════════
+    const SCENARIOS = {
+        rpg: {
+            name:'地牢冒险',icon:'⚔️',desc:'经典RPG冒险，探索地牢击败恶魔',
+            world:{locations:{village:{name:'村庄',desc:'宁静的小村庄，有旅馆和补给。',conn:['forest','dungeon_entrance'],items:['healing_potion','bread'],enemies:[]},forest:{name:'迷雾森林',desc:'茂密森林，草药与陷阱并存。',conn:['village','cave'],items:['herbs','arrows'],enemies:['wolf','goblin']},dungeon_entrance:{name:'地牢入口',desc:'阴冷入口，骷髅把守。',conn:['village','dungeon_hall'],items:[],enemies:['skeleton']},dungeon_hall:{name:'地牢大厅',desc:'终点大厅，魔剑与恶魔在此。',conn:['dungeon_entrance'],items:['magic_sword','gold_coin'],enemies:['demon','vampire']},cave:{name:'神秘山洞',desc:'法力充沛，魔法威力翻倍。',conn:['forest'],items:['magic_crystal','ancient_scroll'],enemies:['cave_troll']}},items:{healing_potion:{name:'治疗药水',effect:'heal',val:30},bread:{name:'面包',effect:'heal',val:10},herbs:{name:'草药',effect:'heal',val:15},arrows:{name:'箭矢',effect:'weapon',val:5},magic_sword:{name:'魔法剑',effect:'weapon',val:25},gold_coin:{name:'金币',effect:'currency',val:10},magic_crystal:{name:'魔法水晶',effect:'magic',val:20},ancient_scroll:{name:'古老卷轴',effect:'magic',val:30}},enemies:{wolf:{name:'灰狼',hp:30,maxHp:30,dmg:15,reward:5},goblin:{name:'哥布林',hp:25,maxHp:25,dmg:10,reward:8},skeleton:{name:'骷髅',hp:40,maxHp:40,dmg:18,reward:12},demon:{name:'恶魔',hp:60,maxHp:60,dmg:25,reward:20},vampire:{name:'吸血鬼',hp:50,maxHp:50,dmg:22,reward:18},cave_troll:{name:'山洞巨魔',hp:70,maxHp:70,dmg:30,reward:25}}},
+            agents:[{id:'warrior',name:'战士阿强',icon:'⚔️',role:'战士',hp:100,maxHp:100,location:'village',inventory:['bread'],gold:10,priority:1,prompt:'你是战士阿强，勇猛善战。目标：探索地牢、击败恶魔。攻击30，持魔法剑+25，减伤5。'},{id:'mage',name:'法师小慧',icon:'🔮',role:'法师',hp:70,maxHp:70,location:'village',inventory:['ancient_scroll'],gold:15,priority:2,prompt:'你是法师小慧，擅长搜索与魔法攻击。目标：收集魔法材料，协助击败敌人。魔攻20，山洞内+20。'}],
+            enemyHome:{wolf:'forest',goblin:'forest',skeleton:'dungeon_entrance',cave_troll:'cave'},
+            checkGoal(a,W){if(a.location==='dungeon_hall'&&!(W.locations.dungeon_hall?.enemies||[]).length)return{done:true,reason:'地牢大厅已清空，任务完成！'};if(a.hp<=0)return{done:true,reason:'HP归零'};return{done:false}},
+        },
+        lostcity: {
+            name:'失落之城',icon:'🏛️',desc:'探索远古遗迹，击败巨龙夺取宝藏',
+            world:{locations:{ruins_gate:{name:'废墟大门',desc:'残破的巨型石门。',conn:['shadow_hall','watchtower'],items:['torch','ancient_map'],enemies:['stone_golem']},shadow_hall:{name:'暗影长廊',desc:'幽暗的走廊。',conn:['ruins_gate','trap_room','treasure_room'],items:['rope'],enemies:['shadow_bat']},trap_room:{name:'机关密室',desc:'布满陷阱。',conn:['shadow_hall'],items:['gem'],enemies:['mech_guard']},treasure_room:{name:'宝藏室',desc:'金光闪闪的宝藏室。',conn:['shadow_hall','dragon_lair'],items:['life_spring','dragon_gem'],enemies:[]},dragon_lair:{name:'龙之巢穴',desc:'炙热的巢穴。',conn:['treasure_room'],items:['dragon_scale'],enemies:['ancient_dragon']},watchtower:{name:'瞭望塔',desc:'可俯瞰全城遗迹。',conn:['ruins_gate'],items:['eagle_eye'],enemies:[]}},items:{torch:{name:'火炬',effect:'weapon',val:5},ancient_map:{name:'古代地图',effect:'info',val:0},rope:{name:'绳索',effect:'tool',val:0},gem:{name:'宝石',effect:'currency',val:20},life_spring:{name:'生命源泉',effect:'heal',val:50},dragon_gem:{name:'龙之宝石',effect:'magic',val:40},dragon_scale:{name:'龙鳞甲',effect:'armor',val:15},eagle_eye:{name:'鹰眼望远镜',effect:'info',val:0}},enemies:{stone_golem:{name:'石像怪',hp:50,maxHp:50,dmg:20,reward:15},shadow_bat:{name:'暗影蝙蝠',hp:20,maxHp:20,dmg:10,reward:5},mech_guard:{name:'机械守卫',hp:60,maxHp:60,dmg:25,reward:20},ancient_dragon:{name:'远古巨龙',hp:120,maxHp:120,dmg:40,reward:60}}},
+            agents:[{id:'thief',name:'盗贼小李',icon:'🗡️',role:'盗贼',hp:80,maxHp:80,location:'ruins_gate',inventory:['rope'],gold:5,priority:1,prompt:'你是盗贼小李，身手敏捷。目标：探索遗迹、协助击败巨龙。攻击25+偷袭15。'},{id:'scholar',name:'学者老王',icon:'📖',role:'学者',hp:60,maxHp:60,location:'ruins_gate',inventory:['ancient_map'],gold:20,priority:2,prompt:'你是学者老王，博学多才。目标：解读古文、支援战斗。攻击15。'}],
+            enemyHome:{stone_golem:'ruins_gate',shadow_bat:'shadow_hall',mech_guard:'trap_room'},
+            checkGoal(a,W){if(a.location==='dragon_lair'&&!(W.locations.dragon_lair?.enemies||[]).length)return{done:true,reason:'远古巨龙已被击败！'};if(a.hp<=0)return{done:true,reason:'HP归零'};return{done:false}},
+        },
     };
+    const DEFAULT_PROMPTS={systemPrompt:'你是文字RPG中的自由Agent。THOUGHT表达想法，ACTION可以是自然语言或JSON格式游戏操作。',toolsDesc:'【可用操作】move/search/pickup_item/attack/speak/narrate/inspect/use_item/rest/complete_turn',outputFormat:'THOUGHT: [想法]\nACTION: [JSON或自然语言]',envNarrations:'🌧️ 暴雨倾盆。\n🌟 神秘光芒笼罩。\n💨 深处传来怒吼。\n🌙 夜幕降临。\n☀️ 晨光破晓。'};
 
-    // ──────────────────────────────────────────────────────────
-    //  运行状态（全局 G）
-    // ──────────────────────────────────────────────────────────
+    // ══════════════════════════════════════════════════════════════
+    //  PART 2 — 状态 & 配置
+    // ══════════════════════════════════════════════════════════════
+    let G={running:false,paused:false,stopReq:false,round:0,curIdx:0,agents:[],userAgent:null,world:null,inited:false,msgQueue:[],actionsHistory:[],waitingForUser:false,userActionResolve:null,currentPage:'dashboard',gmEnabled:true};
+    let LOG=[], METRICS={llmCalls:0,toolCalls:0,fcCalls:0,textCalls:0,turns:0,rounds:0,errors:0,totalResponseMs:0,successes:0,failures:0};
+    const llmAbortControllers=new Set();
+    let logRenderScheduled=null;
 
-    let G = {
-        running: false, paused: false, stopReq: false,
-        round: 0, curIdx: 0,
-        agents: [], userAgent: null, world: null, inited: false,
-        msgQueue: [], actionsHistory: [],
-        waitingForUser: false, userActionResolve: null
-    };
+    function abortAllLLM(){llmAbortControllers.forEach(c=>{try{c.abort();}catch(_){}});llmAbortControllers.clear();}
+    function normalizeGameWorld(W){const o=JSON.parse(JSON.stringify(W||{}));if(!o.locations)o.locations={};for(const[k,v]of Object.entries(o.locations)){v.conn=Array.isArray(v.conn)?v.conn:[];v.items=Array.isArray(v.items)?v.items:[];v.enemies=Array.isArray(v.enemies)?v.enemies:[];if(!v.name)v.name=k;if(v.desc===undefined)v.desc='';}o.items=o.items&&typeof o.items==='object'?o.items:{};o.enemies=o.enemies&&typeof o.enemies==='object'?o.enemies:{};return o;}
+    function friendlyHttp(status,detail){const d=(detail||'').trim();if(status===401)return`认证失败(401)：请检查 API Key。${d?' '+d:''}`;if(status===403)return`拒绝访问(403)${d?'：'+d:''}`;if(status===404)return`接口不存在(404)：请确认 API 地址为兼容 OpenAI Chat Completions 的端点。${d?' '+d:''}`;if(status===429)return`请求过频(429)：请稍后重试。${d?' '+d:''}`;if(status>=500)return`服务端错误(${status})：请稍后重试。${d?' '+d:''}`;return`请求失败(${status})${d?'：'+d:''}`;}
+    async function parseApiErrorBody(r){try{const j=await r.clone().json();return j.error?.message||j.message||(typeof j.error==='string'?j.error:'')||'';}catch(_){try{return await r.text();}catch(__){return'';}}}
 
-    let LOG = [];
+    function addLog(m,l='info'){const t=new Date().toLocaleTimeString('zh-CN',{hour12:false});LOG.push({ts:t,level:l,msg:String(m)});if(LOG.length>500)LOG.splice(0,100);if(logRenderScheduled)return;logRenderScheduled=requestAnimationFrame(()=>{logRenderScheduled=null;renderLogs();});}
+    function cfg(){const{extensionSettings:e}=SillyTavern.getContext();if(!e[MODULE])e[MODULE]={apiUrl:'',apiKey:'',apiModel:'gpt-4o-mini',maxRounds:10,stepDelay:1000,maxSteps:5,llmTimeout:60000,worldInfo:'',worldInfoSelected:[],scenario:'rpg',useFunctionCalling:true,gmEnabled:true,tavernChatMode:'both',userName:'玩家',userIcon:'👤',agents:null,promptTemplates:null};const s=e[MODULE];if(!s.scenario)s.scenario='rpg';if(s.useFunctionCalling===undefined)s.useFunctionCalling=true;if(s.gmEnabled===undefined)s.gmEnabled=true;if(s.tavernChatMode===undefined)s.tavernChatMode='both';if(!s.maxSteps)s.maxSteps=5;if(!s.stepDelay)s.stepDelay=1000;if(!s.llmTimeout)s.llmTimeout=60000;if(!s.userName)s.userName='玩家';if(!s.userIcon)s.userIcon='👤';const sc=SCENARIOS[s.scenario]||SCENARIOS.rpg;if(!s.agents)s.agents=JSON.parse(JSON.stringify(sc.agents));if(!s.promptTemplates)s.promptTemplates={...DEFAULT_PROMPTS};return s;}
+    function chatMode(){return cfg().tavernChatMode||'both';}
+    function pt(k){return(cfg().promptTemplates||{})[k]??(DEFAULT_PROMPTS[k]??'');}
+    function saveCfg(){SillyTavern.getContext().saveSettingsDebounced();}
+    function esc(s){return String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+    function escA(s){return String(s||'').replace(/"/g,'&quot;');}
+    function sleep(ms){return new Promise(r=>setTimeout(r,ms));}
+    function waitResume(){return new Promise(r=>{const id=setInterval(()=>{if(!G.paused||!G.running){clearInterval(id);r();}},200);});}
+    function getScenario(){return SCENARIOS[cfg().scenario]||SCENARIOS.rpg;}
+    function getWorldTpl(){const t=cfg().promptTemplates||{};try{const p=JSON.parse(t.worldTpl||'{}');if(p.locations&&p.items&&p.enemies)return normalizeGameWorld(p);}catch(_){}return normalizeGameWorld(JSON.parse(JSON.stringify(getScenario().world)));}
+    async function getSTWorldInfoNames(){try{const{getRequestHeaders:h}=SillyTavern.getContext();const r=await fetch('/api/settings/get',{method:'POST',headers:h(),body:JSON.stringify({})});if(!r.ok)throw new Error(r.status);return(await r.json()).world_names||[];}catch(e){addLog(`WI列表失败:${e.message}`,'warn');return[];}}
+    async function loadSTWorldInfoFile(n){if(!n?.trim())return null;try{const{getRequestHeaders:h}=SillyTavern.getContext();const r=await fetch('/api/worldinfo/get',{method:'POST',headers:h(),body:JSON.stringify({name:n.trim()})});if(!r.ok)throw new Error(r.status);const d=await r.json();const entries=d.entries||d;return(typeof entries==='object'?Object.values(entries):[]).map(e=>e.content||'').filter(Boolean).join('\n');}catch(_){return null;}}
+    function saveGame(slot){if(!G.world)return;localStorage.setItem(`${SAVE_KEY}_${slot}`,JSON.stringify({round:G.round,agents:G.agents,userAgent:G.userAgent,world:G.world,metrics:{...METRICS},ts:new Date().toLocaleString('zh-CN')}));addLog(`存档→槽位${slot}`);postSystemMsg(`💾 已存档（槽位${slot}）`);updateSaveInfo();}
+    function loadGame(slot){const raw=localStorage.getItem(`${SAVE_KEY}_${slot}`);if(!raw)return;try{const d=JSON.parse(raw);G.round=d.round||0;G.agents=d.agents||[];G.userAgent=d.userAgent;G.world=d.world;G.inited=true;if(d.metrics)Object.assign(METRICS,d.metrics);updateAll();postSystemMsg(`📂 已读档（槽位${slot}）`);}catch(e){addLog(`读档失败:${e.message}`,'error');}}
+    function getSaveInfo(i){const r=localStorage.getItem(`${SAVE_KEY}_${i}`);if(!r)return'空';try{const d=JSON.parse(r);return`第${d.round}轮 ${d.ts||''}`;}catch(_){return'损坏';}}
+    function updateSaveInfo(){[1,2,3].forEach(i=>{const e=document.getElementById(`mac-si-${i}`);if(e)e.textContent=getSaveInfo(i);});}
 
-    function addLog(msg, level = 'info') {
-        const ts = new Date().toLocaleTimeString('zh-CN', { hour12: false });
-        LOG.push({ ts, level, msg: String(msg) });
-        if (LOG.length > 400) LOG.splice(0, LOG.length - 400);
-        renderLog();
+    // ══════════════════════════════════════════════════════════════
+    //  PART 3 — 游戏引擎
+    // ══════════════════════════════════════════════════════════════
+    function resetGame(){const s=cfg();G.world=getWorldTpl();const first=Object.keys(G.world.locations)[0]||Object.keys(getScenario().world.locations)[0];G.agents=s.agents.map(a=>({...JSON.parse(JSON.stringify(a)),hp:a.maxHp||100,maxHp:a.maxHp||100,location:(a.location&&G.world.locations[a.location])?a.location:first,inventory:[...(a.inventory||[])],gold:a.gold||0}));const ik=Object.keys(G.world.items);G.userAgent={id:'user',name:s.userName,icon:s.userIcon,role:'主角',hp:100,maxHp:100,location:first,inventory:ik.length?[ik[0]]:[],gold:20};G.round=0;G.curIdx=0;G.actionsHistory=[];G.running=false;G.paused=false;G.stopReq=false;G.inited=true;G.waitingForUser=false;G.userActionResolve=null;G.gmEnabled=s.gmEnabled;}
+    function resolveId(W,type,name){if(!name||!W)return null;const n=String(name).trim().toLowerCase();const maps={location:W.locations,item:W.items,enemy:W.enemies};const m=maps[type];if(m)for(const[id,o]of Object.entries(m))if(id===n||(o.name&&o.name.toLowerCase().includes(n)))return id;if(type==='agent')for(const a of[...(G.userAgent?[G.userAgent]:[]),...G.agents])if(a.id===n||(a.name&&a.name.toLowerCase().includes(n)))return a.id;return null;}
+    function resolveParams(W,tool,params){const p={...params};if(tool==='move'&&p.destination)p.destination=resolveId(W,'location',p.destination)||p.destination;if(tool==='attack'&&p.target)p.target=resolveId(W,'enemy',p.target)||resolveId(W,'agent',p.target)||p.target;if(['pickup_item','pickup','take'].includes(tool)&&p.target)p.target=resolveId(W,'item',p.target)||p.target;if(tool==='use_item'&&p.item)p.item=resolveId(W,'item',p.item)||p.item;if(['speak','interact'].includes(tool)){if(p.to)p.to=resolveId(W,'agent',p.to)||p.to;if(p.agent)p.agent=resolveId(W,'agent',p.agent)||p.agent;}if(tool==='inspect'&&p.target)p.target=resolveId(W,'item',p.target)||resolveId(W,'location',p.target)||resolveId(W,'enemy',p.target)||p.target;return p;}
+
+    function executeTool(agent,tool,params){const W=G.world,loc=W.locations[agent.location];switch(tool){case'move':{let d=params.destination;if(d&&!W.locations[d])d=resolveId(W,'location',d)||d;if(!W.locations[d])return`未知地点"${params.destination}"。可前往: ${loc.conn.map(c=>`${W.locations[c].name}(${c})`).join(', ')}`;if(!loc.conn.includes(d))return`不能从【${loc.name}】到【${W.locations[d].name}】`;agent.location=d;const nl=W.locations[d];let r=`移动至【${nl.name}】。${nl.desc}`;if(nl.enemies.length)r+=` ⚠️ 遭遇: ${nl.enemies.map(e=>W.enemies[e]?.name||e).join('、')}！`;if(nl.items.length)r+=` 💎 地面: ${nl.items.map(i=>W.items[i]?.name||i).join('、')}`;return r;}case'search':{if(!loc.items.length)return`在【${loc.name}】没找到物品。`;const id=loc.items.shift();agent.inventory.push(id);return`发现【${W.items[id]?.name||id}】！`;}case'pickup_item':case'pickup':case'take':{let t=params.target||params.item;if(t&&!W.items[t])t=resolveId(W,'item',t)||t;if(!t||!W.items[t])return'无效物品。';const idx=loc.items.indexOf(t);if(idx===-1)return`地面没有"${t}"。`;loc.items.splice(idx,1);agent.inventory.push(t);return`拾取【${W.items[t].name}】！`;}case'attack':{let t=params.target;if(t&&!loc.enemies.includes(t))t=resolveId(W,'enemy',t)||t;if(loc.enemies.includes(t)){const en=W.enemies[t];let dmg=agent.role==='战士'?30:agent.role==='法师'?20:agent.role==='盗贼'?25:20;if(agent.inventory.includes('magic_sword'))dmg+=25;if(agent.role==='法师'&&agent.location==='cave')dmg+=20;if(agent.role==='盗贼')dmg+=15;en.hp-=dmg;if(en.hp<=0){loc.enemies=loc.enemies.filter(e=>e!==t);agent.gold+=en.reward;W.enemies[t].hp=en.maxHp;METRICS.successes++;return`对【${en.name}】造成${dmg}伤害，击败！+${en.reward}金币 💰${agent.gold}`;}const taken=Math.max(0,en.dmg-(agent.role==='战士'?5:0));agent.hp=Math.max(0,agent.hp-taken);W.enemies[t].hp=en.hp;return`对【${en.name}】造成${dmg}伤害(HP:${en.hp})。反击${taken}伤害，HP:${agent.hp}/${agent.maxHp}`;}const all=[...(G.userAgent?[G.userAgent]:[]),...G.agents];const tgt=all.find(a=>a&&a.hp>0&&a.location===agent.location&&a.id!==agent.id&&(a.id===t||a.name===t));if(tgt){const dmg=agent.role==='战士'?25:20;tgt.hp=Math.max(0,tgt.hp-dmg);broadcastEvent(agent,tgt.id,`（${agent.name}攻击了你，${dmg}伤害）`);return`对【${tgt.name}】造成${dmg}伤害。HP:${tgt.hp}/${tgt.maxHp}`;}return`没有"${params.target}"。`;}case'interact':case'speak':{const all=[...(G.userAgent?[G.userAgent]:[]),...G.agents];const who=params.agent||params.to;let tgt=all.find(a=>a&&(a.id===who||a.name===who));if(!tgt&&who)tgt=all.find(a=>a&&resolveId(null,'agent',who)===a.id);if(!tgt)return`找不到"${who}"。`;const msg=params.message||params.text||'';if(msg)broadcastEvent(agent,tgt.id,msg);return`对${tgt.icon}${tgt.name}说："${msg}"`;}case'narrate':return params.text?`【${agent.name}】${params.text}`:'（无叙述）';case'inspect':{let t=params.target;if(t&&!W.items[t]&&!W.locations[t]&&!W.enemies[t])t=resolveId(W,'item',t)||resolveId(W,'location',t)||resolveId(W,'enemy',t)||t;if(W.items[t])return`【${W.items[t].name}】: ${W.items[t].effect},值=${W.items[t].val}`;if(W.locations[t])return`【${W.locations[t].name}】: ${W.locations[t].desc}`;if(W.enemies[t])return`【${W.enemies[t].name}】: HP=${W.enemies[t].hp}/${W.enemies[t].maxHp}`;return`"${t}"无详细信息。`;}case'use_item':{let iid=params.item;if(iid&&!agent.inventory.includes(iid))iid=resolveId(W,'item',iid)||iid;if(!agent.inventory.includes(iid))return`背包没有"${iid}"。`;const item=W.items[iid];if(!item)return'无效物品。';if(item.effect==='heal'){const h=Math.min(item.val,agent.maxHp-agent.hp);agent.hp+=h;agent.inventory=agent.inventory.filter(i=>i!==iid);return`使用【${item.name}】，+${h}HP (${agent.hp}/${agent.maxHp})`;}return`使用【${item.name}】`;}case'rest':{const h=Math.min(20,agent.maxHp-agent.hp);agent.hp+=h;return`休息，+${h}HP (${agent.hp}/${agent.maxHp})`;}case'complete_turn':return`结束回合。${params.summary||''}`;default:{const u=String(tool).toLowerCase();if(['insult','curse','greet','say','talk','yell'].some(k=>u.includes(k)))return`【${agent.name}】${params.message||params.text||tool}`;if(['go','walk','run','enter','flee'].some(k=>u.includes(k))&&(params.destination||params.target))return executeTool(agent,'move',{destination:params.destination||params.target});if(['hit','fight','strike','slash'].some(k=>u.includes(k))&&params.target)return executeTool(agent,'attack',{target:params.target});return`【${agent.name}】${params.text||params.message||tool}`;}}
     }
 
-    function renderLog() {
-        const el = document.getElementById('mac-log-box');
-        if (!el) return;
-        el.innerHTML = LOG.slice(-100).map(e =>
-            `<div class="mac-log-line mac-log-${e.level}">[${e.ts}] ${escHtml(e.msg)}</div>`
-        ).join('');
-        el.scrollTop = el.scrollHeight;
+    function executeGMTool(tool,params){const W=G.world,all=[...(G.userAgent?[G.userAgent]:[]),...G.agents];switch(tool){case'narrate_event':return params.text||'';case'spawn_enemy':{const loc=W.locations[params.location];if(!loc||!W.enemies[params.enemy_id])return'无效';if(!loc.enemies.includes(params.enemy_id)){loc.enemies.push(params.enemy_id);W.enemies[params.enemy_id].hp=W.enemies[params.enemy_id].maxHp;}return`👹【${loc.name}】出现了${W.enemies[params.enemy_id].name}！`;}case'heal_character':{const a=all.find(x=>x.id===params.target||x.name===params.target);if(!a)return'找不到角色';const h=Math.min(params.amount||10,a.maxHp-a.hp);a.hp+=h;return`🩹 ${a.name}+${h}HP (${a.hp}/${a.maxHp})`;}case'damage_character':{const a=all.find(x=>x.id===params.target||x.name===params.target);if(!a)return'找不到角色';a.hp=Math.max(0,a.hp-(params.amount||5));return`⚡ ${a.name}-${params.amount||5}HP${params.reason?`（${params.reason}）`:''} → ${a.hp}/${a.maxHp}`;}default:return params.text||tool;}}
+
+    function broadcastEvent(from,toId,msg){G.msgQueue.push({from:from.id,fromName:from.name,to:toId,msg,round:G.round});}
+
+    // ══════════════════════════════════════════════════════════════
+    //  PART 4 — LLM 层
+    // ══════════════════════════════════════════════════════════════
+    async function callLLM(sys,prompt){const s=cfg();METRICS.llmCalls++;const t0=Date.now();if(s.apiUrl?.trim()){const ac=new AbortController();llmAbortControllers.add(ac);try{const r=await fetch(s.apiUrl.trim(),{method:'POST',headers:{'Content-Type':'application/json',...(s.apiKey?{Authorization:`Bearer ${s.apiKey}`}:{})},body:JSON.stringify({model:s.apiModel||'gpt-4o-mini',messages:[{role:'system',content:sys},{role:'user',content:prompt}],temperature:.75,max_tokens:600}),signal:ac.signal});METRICS.totalResponseMs+=Date.now()-t0;if(!r.ok){const det=await parseApiErrorBody(r);throw new Error(friendlyHttp(r.status,det));}const d=await r.json();return d.choices?.[0]?.message?.content||'';}finally{llmAbortControllers.delete(ac);}}const{generateRaw}=SillyTavern.getContext();const res=await generateRaw({systemPrompt:sys,prompt});METRICS.totalResponseMs+=Date.now()-t0;return res;}
+    async function callLLMFC(messages,tools){const s=cfg();METRICS.llmCalls++;METRICS.fcCalls++;const t0=Date.now();if(!s.apiUrl?.trim())throw new Error('FC需要自定义API');const ac=new AbortController();llmAbortControllers.add(ac);try{const r=await fetch(s.apiUrl.trim(),{method:'POST',headers:{'Content-Type':'application/json',...(s.apiKey?{Authorization:`Bearer ${s.apiKey}`}:{})},body:JSON.stringify({model:s.apiModel||'gpt-4o-mini',messages,tools,tool_choice:'auto',temperature:.75,max_tokens:800}),signal:ac.signal});METRICS.totalResponseMs+=Date.now()-t0;if(!r.ok){const det=await parseApiErrorBody(r);throw new Error(friendlyHttp(r.status,det));}return(await r.json()).choices?.[0]?.message||{};}finally{llmAbortControllers.delete(ac);}}
+    function callTO(fn){const ms=cfg().llmTimeout||60000;return new Promise((ok,no)=>{let d=false;const t=setTimeout(()=>{if(d)return;d=true;const e=new Error(`超时(${ms/1000}s)`);e.name='TimeoutError';no(e);},ms);fn().then(r=>{if(d)return;d=true;clearTimeout(t);ok(r);}).catch(e=>{if(d)return;d=true;clearTimeout(t);no(e);});});}
+    function buildSysPrompt(a){const W=G.world,o=G.agents.filter(x=>x.id!==a.id),ids=[...(G.userAgent?[`${G.userAgent.name}(${G.userAgent.id})`]:[]),...o.map(x=>`${x.name}(${x.id})`)].join(', '),lids=Object.entries(W.locations).map(([id,l])=>`${l.name}→${id}`).join(', '),iids=Object.entries(W.items).map(([id,it])=>`${it.name}→${id}`).join(', '),eids=Object.entries(W.enemies).map(([id,en])=>`${en.name}→${id}`).join(', ');return`${a.prompt}\n${cfg().worldInfo?`【世界信息】${cfg().worldInfo}\n`:''}【合法ID】地点:${lids} 物品:${iids} 敌人:${eids} 角色:${ids}`;}
+    function buildStatePrompt(a){const W=G.world,loc=W.locations[a.location],o=G.agents.filter(x=>x.id!==a.id),msgs=G.msgQueue.filter(m=>m.to===a.id&&m.round>=G.round-1),hist=G.actionsHistory.filter(h=>h.agentId!==a.id&&h.round>=G.round-1).slice(-5);return`R${G.round} | ${loc.name}(${a.location}) HP:${a.hp}/${a.maxHp} 💰${a.gold}\n背包:[${a.inventory.map(i=>W.items[i]?.name||i).join('、')||'空'}] 地面:[${loc.items.map(i=>W.items[i]?.name||i).join('、')||'无'}]\n敌人:[${loc.enemies.map(e=>`${W.enemies[e]?.name}(HP:${W.enemies[e]?.hp})`).join('、')||'无'}] 可前往:${loc.conn.map(c=>`${W.locations[c]?.name}(${c})`).join('、')}\n队友:${[...(G.userAgent?[`${G.userAgent.icon}${G.userAgent.name} HP:${G.userAgent.hp} @${W.locations[G.userAgent.location]?.name}`]:[]),...o.map(x=>`${x.icon}${x.name} HP:${x.hp} @${W.locations[x.location]?.name}`)].join(' | ')}\n${msgs.length?`消息:${msgs.map(m=>`${m.fromName}:"${m.msg}"`).join(' ')}`:''}\n${hist.length?`动态:${hist.map(h=>`[R${h.round}]${h.agentName}:${h.tool}`).join(' ')}`:''}`;
+    }
+    function buildReActPrompt(a,step,hist){return`【角色】${a.prompt}\n${cfg().worldInfo?`【世界】${cfg().worldInfo}\n`:''}${buildStatePrompt(a)}\n${pt('toolsDesc')}\n${hist.length?`【已执行】${hist.map(h=>`步${h.step}:${h.tool}→${h.obs.substring(0,50)}`).join(' | ')}`:''}步骤${step}：\n${pt('outputFormat')}`;}
+    function parseReAct(raw){const thought=(raw.match(/THOUGHT:\s*([\s\S]*?)(?=\nACTION:|$)/i)||[])[1]?.trim()||'';const ar=(raw.match(/ACTION:\s*([\s\S]*)/i)||[])[1]?.trim()||'';let tool=null,params={};const jm=ar.match(/\{[\s\S]*\}/);if(jm)try{const o=JSON.parse(jm[0]);tool=o.tool;params=o.params||{};}catch(_){}return{thought,tool,params,rawAction:tool?'':ar};}
+
+    // ══════════════════════════════════════════════════════════════
+    //  PART 5 — Agent 执行
+    // ══════════════════════════════════════════════════════════════
+    function ruleIntent(msg,W){const s=String(msg||'').trim();if(!s||!W)return null;for(const k of['前往','去往','去','到','进入']){if(s.startsWith(k)&&s.length>k.length){const id=resolveId(W,'location',s.slice(k.length).trim());if(id)return{tool:'move',params:{destination:id}};}}for(const k of['攻击','打','揍','砍']){if(s.startsWith(k)){const rest=s.slice(k.length).replace(/^[了着一下]\s*/,'').trim();const id=resolveId(W,'enemy',rest)||resolveId(W,'agent',rest);if(id)return{tool:'attack',params:{target:id}};}}for(const k of['拾取','拿','捡']){if(s.startsWith(k)){const id=resolveId(W,'item',s.slice(k.length).trim());if(id)return{tool:'pickup_item',params:{target:id}};}}for(const k of['使用','用','吃','喝']){if(s.startsWith(k)){const id=resolveId(W,'item',s.slice(k.length).replace(/^[了着]\s*/,'').trim());if(id)return{tool:'use_item',params:{item:id}};}}const sm=s.match(/^(?:对|和|跟|向)(.+?)(?:说|道|讲)(?:[:：]?\s*)?(.*)$/);if(sm){const id=resolveId(W,'agent',sm[1].trim());if(id)return{tool:'speak',params:{to:id,message:sm[2]?.trim()||'…'}};}if(/^(搜索|搜|探索)/.test(s))return{tool:'search',params:{}};if(/^(休息|歇|回血)/.test(s))return{tool:'rest',params:{}};return null;}
+    async function parseUserIntent(msg){const u=G.userAgent,W=G.world;if(!u||!W)return{tool:'narrate',params:{text:msg}};const r=ruleIntent(msg,W);if(r)return r;const all=[...(G.userAgent?[G.userAgent]:[]),...G.agents],loc=W.locations[u.location];try{const raw=await callTO(()=>callLLM('将用户自然语言映射为游戏操作。只输出JSON{"tool":"","params":{}}',`用户:${msg}\n位置:${loc?.name}(${u.location}) 角色:${all.map(a=>`${a.name}→${a.id}`).join(',')}\n敌人:${(loc?.enemies||[]).map(e=>`${W.enemies[e]?.name}(${e})`).join(',')||'无'}\n地点:${Object.entries(W.locations).map(([id,l])=>`${l.name}→${id}`).join(',')}`));const m=(raw||'').match(/\{[\s\S]*?\}/);if(m){const o=JSON.parse(m[0]);if(o.tool)return{tool:o.tool,params:resolveParams(W,o.tool,o.params||{})};}}catch(_){}return{tool:'narrate',params:{text:msg}};}
+    async function interpretNatural(agent,text){const W=G.world,all=[...(G.userAgent?[G.userAgent]:[]),...G.agents];try{const raw=await callTO(()=>callLLM('将Agent自然语言解析为游戏指令。只输出JSON{"tool":"","params":{}}',`Agent(${agent.name}):${text}\n角色:${all.map(a=>`${a.name}→${a.id}`).join(',')}`));const m=(raw||'').match(/\{[\s\S]*?\}/);if(m){const o=JSON.parse(m[0]);if(o.tool)return{tool:o.tool,params:resolveParams(W,o.tool,o.params||{})};}}catch(_){}return{tool:'narrate',params:{text}};}
+    function fallbackAction(a){const W=G.world,loc=W.locations[a.location],msgs=G.msgQueue.filter(m=>m.to===a.id&&m.round>=G.round-1);if(msgs.length)return{thought:'回应消息。',tool:'speak',params:{to:msgs[msgs.length-1].from,message:'…'}};if(a.hp<a.maxHp*.7){const hi=a.inventory.find(i=>W.items[i]?.effect==='heal');if(hi)return{thought:'治疗。',tool:'use_item',params:{item:hi}};}if(loc.enemies.length)return{thought:'应战！',tool:'attack',params:{target:loc.enemies[0]}};return{thought:'观察。',tool:'narrate',params:{text:`${a.name}保持警惕。`}};}
+
+    async function runTurnFC(agent){const mx=cfg().maxSteps||5,msgs=[{role:'system',content:buildSysPrompt(agent)},{role:'user',content:buildStatePrompt(agent)}];for(let s=1;s<=mx;s++){if(G.paused)await waitResume();if(G.stopReq||!G.running)break;const sc=getScenario(),gl=sc.checkGoal(agent,G.world);if(gl.done){postSystemMsg(`✅ ${agent.name}：${gl.reason}`);break;}const tid=postThinking(agent,s,mx);try{const resp=await callTO(()=>callLLMFC(msgs,FC_TOOLS));removeThinking(tid);if(resp.tool_calls?.length){msgs.push({role:'assistant',content:resp.content||null,tool_calls:resp.tool_calls});for(const tc of resp.tool_calls){let args;try{args=JSON.parse(tc.function.arguments||'{}');}catch(_){args={};}const rA=resolveParams(G.world,tc.function.name,args);const res=executeTool(agent,tc.function.name,rA);msgs.push({role:'tool',tool_call_id:tc.id,content:res});METRICS.toolCalls++;G.actionsHistory.push({round:G.round,agentId:agent.id,agentName:agent.name,tool:tc.function.name,observation:res});postAgentMsg(agent,s,resp.content,tc.function.name,res,mx,true);}trimHist();updateAll();if(agent.hp<=0){postSystemMsg(`💀 ${agent.name}倒下`,'error');break;}if(resp.tool_calls.some(tc=>tc.function.name==='complete_turn'))break;await sleep(cfg().stepDelay);}else{if(resp.content)postAgentMsg(agent,s,resp.content,'narrate',resp.content,mx,true);break;}}catch(e){removeThinking(tid);const aborted=e.name==='AbortError'||(e.message&&/aborted|中止/i.test(String(e.message)));if(aborted){postSystemMsg(`⏹ ${agent.name}的请求已中止`,'warn');break;}METRICS.errors++;if(e.name==='TimeoutError'){postSystemMsg(`⏱️ ${agent.name}超时`,'warn');break;}const fb=fallbackAction(agent);postAgentMsg(agent,s,fb.thought,fb.tool,executeTool(agent,fb.tool,fb.params),mx,false);break;}}}
+
+    async function runTurnReAct(agent){const mx=cfg().maxSteps||5;const hist=[];let fails=0;for(let s=1;s<=mx;s++){if(G.paused)await waitResume();if(G.stopReq||!G.running)break;const sc=getScenario(),gl=sc.checkGoal(agent,G.world);if(gl.done){postSystemMsg(`✅ ${agent.name}：${gl.reason}`);break;}const tid=postThinking(agent,s,mx);let parsed=null;try{const raw=await callTO(()=>callLLM(pt('systemPrompt'),buildReActPrompt(agent,s,hist)));METRICS.textCalls++;parsed=parseReAct(raw);}catch(e){removeThinking(tid);const aborted=e.name==='AbortError'||(e.message&&/aborted|中止/i.test(String(e.message)));if(aborted){postSystemMsg(`⏹ ${agent.name}的请求已中止`,'warn');break;}METRICS.errors++;if(e.name==='TimeoutError'){postSystemMsg(`⏱️ ${agent.name}超时`,'warn');break;}fails++;if(fails>=3)break;continue;}if(!parsed||(!parsed.tool&&!parsed.rawAction&&!parsed.thought)){removeThinking(tid);fails++;if(fails>=3)break;const fb=fallbackAction(agent);const obs=executeTool(agent,fb.tool,fb.params);hist.push({step:s,tool:fb.tool,params:fb.params,obs});METRICS.toolCalls++;G.actionsHistory.push({round:G.round,agentId:agent.id,agentName:agent.name,tool:fb.tool,observation:obs});postAgentMsg(agent,s,fb.thought,fb.tool,obs,mx,false);updateAll();await sleep(cfg().stepDelay);continue;}fails=0;let tool=parsed.tool,params=parsed.params;if(!tool&&parsed.rawAction){const i=await interpretNatural(agent,parsed.rawAction);tool=i.tool;params=i.params;}if(!tool&&parsed.thought){tool='narrate';params={text:parsed.thought};}const obs=executeTool(agent,tool||'rest',params||{});hist.push({step:s,tool:tool||'rest',params:params||{},obs});METRICS.toolCalls++;G.actionsHistory.push({round:G.round,agentId:agent.id,agentName:agent.name,tool:tool||'rest',observation:obs});trimHist();removeThinking(tid);postAgentMsg(agent,s,parsed.thought,tool||'rest',obs,mx,false);updateAll();if(tool==='complete_turn')break;if(agent.hp<=0){postSystemMsg(`💀 ${agent.name}倒下`,'error');break;}await sleep(cfg().stepDelay);}}
+
+    async function runTurn(agent){METRICS.turns++;if(cfg().useFunctionCalling&&cfg().apiUrl?.trim())await runTurnFC(agent);else await runTurnReAct(agent);}
+
+    async function runGMTurn(){if(!G.gmEnabled){runEnvFallback();return;}const useFC=cfg().useFunctionCalling&&cfg().apiUrl?.trim(),W=G.world,all=[...(G.userAgent?[G.userAgent]:[]),...G.agents];const st=all.map(a=>`${a.name}(${a.id}) HP:${a.hp}/${a.maxHp} @${W.locations[a.location]?.name}`).join('\n');const ls=Object.entries(W.locations).map(([id,l])=>`${l.name}(${id}): 敌[${l.enemies.map(e=>W.enemies[e]?.name).join(',')||'无'}]`).join('\n');const gmSys='你是GM。推进剧情、制造紧张感、维持平衡。每回合1-2个动作。';const gmP=`R${G.round}:\n${st}\n\n${ls}\n敌人ID:${Object.keys(W.enemies).join(',')} 地点ID:${Object.keys(W.locations).join(',')}`;postSystemMsg('🌍 ── GM 回合 ──','env');if(useFC){try{const resp=await callTO(()=>callLLMFC([{role:'system',content:gmSys},{role:'user',content:gmP}],GM_FC_TOOLS));if(resp.tool_calls?.length)for(const tc of resp.tool_calls){let args;try{args=JSON.parse(tc.function.arguments||'{}');}catch(_){args={};}postSystemMsg(executeGMTool(tc.function.name,args),'env');}else if(resp.content)postSystemMsg(resp.content,'env');}catch(e){if(e.name!=='AbortError')runEnvFallback();}}else{try{const raw=await callTO(()=>callLLM(gmSys,gmP+'\n叙述本回合环境事件（1-2句）。'));if(raw)postSystemMsg(raw.trim(),'env');else runEnvFallback();}catch(e){if(e.name!=='AbortError')runEnvFallback();}}updateAll();}
+
+    function runEnvFallback(){const W=G.world,sc=getScenario(),all=[...(G.userAgent?[G.userAgent]:[]),...G.agents],evs=[];const s0=Object.keys(sc.world.locations)[0];all.forEach(a=>{if(!a||a.hp<=0)return;if(a.location===s0&&a.hp<a.maxHp){const h=15;a.hp=Math.min(a.maxHp,a.hp+h);evs.push(`🏠 ${a.name}休整+${h}HP (${a.hp}/${a.maxHp})`);}});all.forEach(a=>{if(!a||a.hp<=0)return;const loc=W.locations[a.location];if(loc.enemies.length&&a.location!==s0){a.hp=Math.max(0,a.hp-5);evs.push(`⚡ ${a.name}受威胁-5HP (${a.hp}/${a.maxHp})`);}});Object.entries(sc.enemyHome||{}).forEach(([eid,lid])=>{const loc=W.locations[lid];if(loc&&!loc.enemies.includes(eid)&&Math.random()<.3){loc.enemies.push(eid);W.enemies[eid].hp=W.enemies[eid].maxHp;evs.push(`👹【${W.locations[lid].name}】出现${W.enemies[eid].name}！`);}});const narrs=(pt('envNarrations')||'').split('\n').filter(Boolean);if(narrs.length&&Math.random()<.4)evs.push(narrs[Math.floor(Math.random()*narrs.length)]);if(evs.length)evs.forEach(e=>postSystemMsg(e,'env'));else postSystemMsg('风平浪静。','env');}
+    function trimHist(){G.actionsHistory=G.actionsHistory.filter(h=>h.round>=G.round-2);}
+
+    // ══════════════════════════════════════════════════════════════
+    //  PART 6 — 协调层
+    // ══════════════════════════════════════════════════════════════
+    function doInit(){const s=cfg();s.userName=document.getElementById('mac-s-uname')?.value?.trim()||s.userName;s.userIcon=document.getElementById('mac-s-uicon')?.value?.trim()||s.userIcon;saveCfg();resetGame();METRICS={llmCalls:0,toolCalls:0,fcCalls:0,textCalls:0,turns:0,rounds:0,errors:0,totalResponseMs:0,successes:0,failures:0};updateAll();const sc=getScenario();postSystemMsg(`═══ ${sc.name}世界已初始化 ═══`);postSystemMsg(`${G.userAgent.icon}${G.userAgent.name}(主角) + NPC: ${G.agents.map(a=>`${a.icon}${a.name}`).join('、')}`);postSystemMsg(`模式: ${cfg().useFunctionCalling&&cfg().apiUrl?'Function Calling':'ReAct文本'} | GM: ${G.gmEnabled?'ON':'OFF'}`);addLog('初始化完成');navigateTo('game');}
+    function doStart(){if(!G.inited||G.running)return;G.running=true;G.stopReq=false;G.paused=false;updateAll();gameLoop();}
+    function doPause(){G.paused=!G.paused;updateAll();postSystemMsg(G.paused?'⏸ 已暂停':'▶ 继续');}
+    function doStop(){abortAllLLM();G.stopReq=true;G.running=false;G.waitingForUser=false;if(G.userActionResolve){G.userActionResolve('休息');G.userActionResolve=null;}setInputEnabled(false);updateAll();postSystemMsg('⏹ 游戏已停止');}
+
+    async function gameLoop(){const s=cfg(),sc=getScenario();postSystemMsg('🚀 游戏开始（你先行动 → NPC → GM）');const sorted=[...G.agents].sort((a,b)=>a.priority-b.priority);while(G.running&&G.round<s.maxRounds){G.round++;METRICS.rounds++;postSystemMsg(`\n══ 第 ${G.round}/${s.maxRounds} 轮 ══`);updateAll();if(G.paused)await waitResume();if(G.stopReq||!G.running)break;const ui=await waitForUserAction();if(G.stopReq||!G.running)break;const parsed=await parseUserIntent(ui);const ur=G.userAgent?executeTool(G.userAgent,parsed.tool,parsed.params):'';if(G.userAgent){METRICS.toolCalls++;G.actionsHistory.push({round:G.round,agentId:'user',agentName:G.userAgent.name,tool:parsed.tool,observation:ur});trimHist();}postUserMsg(G.userAgent,ui,parsed.tool,ur);updateAll();if(G.userAgent?.hp<=0){postSystemMsg('💀 玩家倒下','error');METRICS.failures++;break;}for(let i=0;i<sorted.length;i++){if(G.stopReq||!G.running)break;if(G.paused)await waitResume();G.curIdx=G.agents.indexOf(sorted[i]);updateAll();if(sorted[i].hp<=0)continue;await runTurn(sorted[i]);updateAll();}await runGMTurn();const gl=sc.checkGoal(G.userAgent||G.agents[0],G.world);if(gl.done&&(gl.reason.includes('完成')||gl.reason.includes('击败'))){postSystemMsg(`🏆 胜利！${gl.reason}`);METRICS.successes++;break;}if(G.agents.every(a=>a.hp<=0)&&(!G.userAgent||G.userAgent.hp<=0)){postSystemMsg('💀 全员阵亡','error');METRICS.failures++;break;}}if(G.round>=cfg().maxRounds&&G.running)postSystemMsg(`🎬 结束，共${G.round}轮`);G.running=false;setInputEnabled(false);updateAll();}
+
+    function waitForUserAction(){return new Promise(r=>{G.waitingForUser=true;G.userActionResolve=r;setInputEnabled(true);['mac-g-input','mac-hud-input','mac-chat-input'].forEach(id=>{const e=document.getElementById(id);if(e){e.value='';e.focus();}});updateAll();});}
+    function submitUserAction(){if(!G.waitingForUser||!G.userActionResolve)return;let text='';for(const id of['mac-g-input','mac-hud-input','mac-chat-input']){const e=document.getElementById(id);if(e&&e.value.trim()){text=e.value.trim();break;}}setInputEnabled(false);G.waitingForUser=false;const r=G.userActionResolve;G.userActionResolve=null;r(text||'休息');}
+    function setInputEnabled(on){['mac-g-input','mac-hud-input','mac-chat-input'].forEach(id=>{const e=document.getElementById(id);if(e){e.disabled=!on;e.placeholder=on?'输入你的行动…':'等待中…';}});['mac-g-send','mac-hud-send','mac-chat-send'].forEach(id=>{const e=document.getElementById(id);if(e)e.disabled=!on;});const bar=document.getElementById('mac-chat-bar');if(bar)bar.style.display=on?'':'none';const sec=document.getElementById('mac-hud-user-sec');if(sec)sec.style.display=on?'':'none';}
+
+    // ══════════════════════════════════════════════════════════════
+    //  PART 7 — 评估
+    // ══════════════════════════════════════════════════════════════
+    function getMetrics(){return{...METRICS,avgMs:METRICS.llmCalls?Math.round(METRICS.totalResponseMs/METRICS.llmCalls):0,fcRate:METRICS.llmCalls?Math.round(METRICS.fcCalls/METRICS.llmCalls*100):0};}
+    function resetMetrics(){METRICS={llmCalls:0,toolCalls:0,fcCalls:0,textCalls:0,turns:0,rounds:0,errors:0,totalResponseMs:0,successes:0,failures:0};updateEval();}
+    async function runAutoTest(rounds){const sEl=document.getElementById('mac-e-status'),rEl=document.getElementById('mac-e-results');if(sEl)sEl.textContent='运行中…';resetMetrics();resetGame();G.running=true;const sc=getScenario(),sorted=[...G.agents].sort((a,b)=>a.priority-b.priority);for(let r=1;r<=(rounds||5)&&G.running;r++){G.round=r;METRICS.rounds++;const u=G.userAgent;if(u){const loc=G.world.locations[u.location];let act;if(loc.enemies.length)act={tool:'attack',params:{target:loc.enemies[0]}};else if(loc.items.length)act={tool:'search',params:{}};else if(loc.conn.length)act={tool:'move',params:{destination:loc.conn[Math.floor(Math.random()*loc.conn.length)]}};else act={tool:'rest',params:{}};executeTool(u,act.tool,act.params);METRICS.toolCalls++;}for(const a of sorted){if(a.hp<=0)continue;await runTurn(a);}runEnvFallback();const gl=sc.checkGoal(G.userAgent||G.agents[0],G.world);if(gl.done){gl.reason.includes('完成')||gl.reason.includes('击败')?METRICS.successes++:METRICS.failures++;break;}if(G.agents.every(a=>a.hp<=0)&&(!G.userAgent||G.userAgent.hp<=0)){METRICS.failures++;break;}}G.running=false;if(sEl)sEl.textContent='完成';if(rEl)rEl.innerHTML=`<pre style="color:var(--txt2);font-size:12px">${JSON.stringify(getMetrics(),null,2)}</pre>`;updateEval();}
+
+    // ══════════════════════════════════════════════════════════════
+    //  PART 8 — UI: 全屏仪表盘 + 浮动HUD + 酒馆聊天注入
+    // ══════════════════════════════════════════════════════════════
+
+    let _stChatCache=null;
+    function getSTChat(){if(_stChatCache&&document.contains(_stChatCache))return _stChatCache;const sels=['#chat','#chat .mes','#messagecontainer','#chat_container','main .chat','.mes_text','.text_chats'];for(const sel of sels){const el=document.querySelector(sel);if(el){_stChatCache=el;return el;}}return null;}
+    function invalidateSTChat(){_stChatCache=null;}
+
+    function buildMsgHTML(ico,name,role,step,total,thought,tool,result,rawText,isFC){
+        const c=TC[tool]||'#6a6258';
+        return `<div class="mac-msg-hd"><span class="mac-msg-ico">${ico}</span><span class="mac-msg-nm">${name}</span><span class="mac-msg-rl">${role}</span>${isFC?'<span class="mac-badge mac-badge-g" style="font-size:10px">FC</span>':''}${step?`<span class="mac-msg-st">步${step}/${total}</span>`:''}<span class="mac-msg-rd">R${G.round}</span></div>${thought?`<div class="mac-msg-thought">💭 ${esc(thought)}</div>`:''}<div class="mac-msg-act"><span class="mac-msg-tag" style="color:${c};border-color:${c}">${TL[tool]||tool}</span><span class="mac-msg-res">${esc(result)}</span></div>${rawText?`<div class="mac-msg-raw">💬 "${esc(rawText)}"</div>`:''}`;
     }
 
-    // ══════════════════════════════════════════════════════════
-    //  层一：数据持久层
-    // ══════════════════════════════════════════════════════════
+    function postUserMsg(ua,text,tool,result){
+        const html=buildMsgHTML(ua?.icon||'👤',ua?.name||'玩家','主角',0,0,'',tool,result,text,false);
+        appendChat('mac-msg mac-msg-user',html);
+        appendSTChat('mac-st-bubble mac-st-user',html);
+    }
+    function postAgentMsg(agent,step,thought,tool,result,total,isFC){
+        const html=buildMsgHTML(agent.icon,agent.name,agent.role,step,total,thought,tool,result,'',isFC);
+        appendChat(`mac-msg${isFC?' mac-msg-fc':''}`,html);
+        appendSTChat(`mac-st-bubble${isFC?' mac-st-fc':''}`,html);
+    }
+    function postSystemMsg(text,type='system'){
+        const cls={system:'mac-msg-sys',env:'mac-msg-env mac-msg-sys',error:'mac-msg-err mac-msg-sys',warn:'mac-msg-wrn mac-msg-sys'};
+        const stcls={system:'mac-st-sys',env:'mac-st-sys mac-st-env',error:'mac-st-sys mac-st-error',warn:'mac-st-sys mac-st-warn'};
+        appendChat(`mac-msg ${cls[type]||'mac-msg-sys'}`,text,true);
+        appendSTChat(stcls[type]||'mac-st-sys',text,true);
+    }
+    function postThinking(agent,step,total){
+        const id=`mac-tk-${Date.now()}`;
+        const html=`${agent.icon} ${agent.name} 思考中（步${step}/${total}）<span class="mac-dots">...</span>`;
+        const fs=document.getElementById('mac-game-chat');
+        if(fs&&chatMode()!=='tavern'){const d=document.createElement('div');d.id=id;d.className='mac-msg mac-msg-think';d.innerHTML=html;fs.appendChild(d);fs.scrollTop=fs.scrollHeight;}
+        const st=chatMode()!=='panel'?getSTChat():null;
+        if(st){const d=document.createElement('div');d.id=`st-${id}`;d.className='mac-st-think';d.innerHTML=html;st.appendChild(d);st.scrollTop=st.scrollHeight;}
+        return id;
+    }
+    function removeThinking(id){if(!id)return;document.getElementById(id)?.remove();document.getElementById(`st-${id}`)?.remove();}
+    function appendChat(cls,html,isText){if(chatMode()==='tavern')return;const el=document.getElementById('mac-game-chat');if(!el)return;const d=document.createElement('div');d.className=cls;if(isText)d.textContent=html;else d.innerHTML=html;el.appendChild(d);el.scrollTop=el.scrollHeight;notifyGame();}
+    function appendSTChat(cls,html,isText){if(chatMode()==='panel')return;const el=getSTChat();if(!el)return;const d=document.createElement('div');d.className=cls;if(isText)d.textContent=html;else d.innerHTML=html;el.appendChild(d);el.scrollTop=el.scrollHeight;}
+    function notifyGame(){if(G.currentPage!=='game'){const b=document.querySelector('.mac-nav[data-page="game"] .mac-nav-badge');if(b)b.style.display='block';}}
 
-    function cfg() {
-        const { extensionSettings } = SillyTavern.getContext();
-        if (!extensionSettings[MODULE]) {
-            extensionSettings[MODULE] = {
-                apiUrl: '', apiKey: '', apiModel: 'gpt-4o-mini',
-                maxRounds: 10, stepDelay: 1000, maxSteps: 5,
-                llmTimeout: 60000, worldInfo: '',
-                agents: JSON.parse(JSON.stringify(AGENTS_TPL))
-            };
-        }
-        const s = extensionSettings[MODULE];
-        if (!s.agents)     s.agents     = JSON.parse(JSON.stringify(AGENTS_TPL));
-        if (!s.userName)   s.userName   = '玩家';
-        if (!s.userIcon)   s.userIcon   = '👤';
-        if (!s.maxSteps)   s.maxSteps   = 5;
-        if (!s.stepDelay)  s.stepDelay  = 1000;
-        if (!s.llmTimeout) s.llmTimeout = 60000;
-        if (s.worldInfo === undefined) s.worldInfo = '';
-        if (!s.worldInfoSelected) s.worldInfoSelected = [];
-        if (!s.promptTemplates) s.promptTemplates = { ...DEFAULT_PROMPT_TEMPLATES };
-        else {
-            Object.keys(DEFAULT_PROMPT_TEMPLATES).forEach(k => {
-                if (s.promptTemplates[k] === undefined) s.promptTemplates[k] = DEFAULT_PROMPT_TEMPLATES[k];
-            });
-        }
-        return s;
+    // ── Full-screen app ──
+
+    function createFullScreenApp(){
+        if(document.getElementById('mac-app'))return;
+        const s=cfg();
+        const navs=[{p:'dashboard',ic:IC.dash,t:'仪表盘'},{p:'game',ic:IC.game,t:'游戏'},{p:'agents',ic:IC.agents,t:'智能体'},{p:'world',ic:IC.world,t:'世界'},{p:'eval',ic:IC.eval,t:'评估'},{p:'settings',ic:IC.settings,t:'设置'},{p:'logs',ic:IC.logs,t:'日志'}];
+        const sb=`<div id="mac-sidebar"><div id="mac-sidebar-logo">${IC.logo}</div>${navs.map(n=>`<button class="mac-nav${n.p==='dashboard'?' active':''}" data-page="${n.p}" data-tip="${n.t}">${n.ic}<span class="mac-nav-badge"></span></button>`).join('')}<span id="mac-sidebar-ver">v${VERSION}</span></div>`;
+        const hd=`<div id="mac-header"><span id="mac-header-title">仪表盘</span><button class="mac-hbtn" id="mac-minimize" title="最小化">─</button><button class="mac-hbtn" id="mac-close" title="关闭">✕</button></div>`;
+        const dp=`<div class="mac-page active" id="mac-page-dashboard"><div class="mac-stats"><div class="mac-stat"><div class="mac-stat-ico">${IC.game} 回合</div><span class="mac-stat-val" id="mac-d-rounds">0</span></div><div class="mac-stat"><div class="mac-stat-ico">${IC.agents} LLM</div><span class="mac-stat-val" id="mac-d-llm">0</span></div><div class="mac-stat"><div class="mac-stat-ico">${IC.settings} 工具</div><span class="mac-stat-val" id="mac-d-tools">0</span></div><div class="mac-stat"><div class="mac-stat-ico">${IC.eval} FC率</div><span class="mac-stat-val" id="mac-d-fc">—</span></div></div><div class="mac-ctrl-bar"><button class="mac-btn mac-btn-s" id="mac-d-init">初始化</button><button class="mac-btn mac-btn-p" id="mac-d-start" disabled>开始</button><button class="mac-btn mac-btn-w" id="mac-d-pause" disabled>暂停</button><button class="mac-btn mac-btn-d" id="mac-d-stop" disabled>停止</button><span class="mac-badge mac-badge-b" id="mac-d-status">未初始化</span></div><div class="mac-card"><div class="mac-card-t">角色状态</div><div class="mac-agents-grid" id="mac-d-agents"></div></div><div class="mac-card"><div class="mac-card-t">近期行动</div><div id="mac-d-recent" style="max-height:200px;overflow-y:auto;font-size:13px;color:var(--txt2)">暂无</div></div></div>`;
+        const gp=`<div class="mac-page" id="mac-page-game"><div id="mac-game-chat"></div><div class="mac-ginput"><input type="text" class="mac-ginput-txt" id="mac-g-input" placeholder="等待初始化…" disabled><button class="mac-ginput-btn" id="mac-g-send" disabled>➤</button></div></div>`;
+        const ap=`<div class="mac-page" id="mac-page-agents"><div style="display:flex;gap:8px;margin-bottom:16px"><button class="mac-btn mac-btn-sm mac-btn-s" id="mac-a-add">➕ 添加</button><button class="mac-btn mac-btn-sm mac-btn-p" id="mac-a-save">💾 保存</button></div><div id="mac-a-list"></div></div>`;
+        const wp=`<div class="mac-page" id="mac-page-world"><div class="mac-card"><div class="mac-card-t">选择场景</div><div class="mac-scn-grid" id="mac-w-scn"></div></div><div class="mac-sec"><div class="mac-sec-hd" data-t="mac-w-tpl-body">世界模板 JSON <span class="mac-sec-arr">▶</span></div><div id="mac-w-tpl-body" class="mac-sec-bd" style="display:none"><textarea class="mac-ta" id="mac-w-tpl" rows="12"></textarea><div style="margin-top:8px;display:flex;gap:6px"><button class="mac-btn mac-btn-sm mac-btn-p" id="mac-w-save">💾 保存</button><button class="mac-btn mac-btn-sm mac-btn-w" id="mac-w-reset">🔄 重置</button></div></div></div><div class="mac-sec"><div class="mac-sec-hd" data-t="mac-w-wi-body">World Info <span class="mac-sec-arr">▶</span></div><div id="mac-w-wi-body" class="mac-sec-bd" style="display:none"><div style="display:flex;gap:6px;margin-bottom:8px"><button class="mac-btn mac-btn-sm mac-btn-s" id="mac-wi-ref">🔄</button><button class="mac-btn mac-btn-sm mac-btn-p" id="mac-wi-en">✓ 启用</button><button class="mac-btn mac-btn-sm mac-btn-s" id="mac-wi-clr">🗑️</button></div><div class="mac-wi-list" id="mac-wi-list"></div><div class="mac-wi-disp" id="mac-wi-disp" style="margin-top:8px">暂无</div></div></div></div>`;
+        const ep=`<div class="mac-page" id="mac-page-eval"><div class="mac-metrics" id="mac-e-met"></div><div class="mac-card"><div class="mac-card-t">自动测试</div><div style="display:flex;gap:8px;align-items:center"><label style="font-size:12px;color:var(--txt2)">轮数</label><input type="number" class="mac-input mac-input-sm" id="mac-e-rounds" value="5" min="1" max="30"><button class="mac-btn mac-btn-sm mac-btn-ok" id="mac-e-run">▶ 运行</button><button class="mac-btn mac-btn-sm mac-btn-s" id="mac-e-reset">🔄</button><span id="mac-e-status" style="font-size:12px;color:var(--txt3)">就绪</span></div></div><div class="mac-card"><div class="mac-card-t">测试结果</div><div id="mac-e-results" style="font-size:13px;color:var(--txt2)">暂无</div></div></div>`;
+        const sp=`<div class="mac-page" id="mac-page-settings"><div class="mac-sec"><div class="mac-sec-hd" data-t="mac-s-api-body">API 设置 <span class="mac-sec-arr">▼</span></div><div id="mac-s-api-body" class="mac-sec-bd"><div class="mac-fg"><label class="mac-fl">API 地址 <span class="mac-fh">留空=酒馆API</span></label><input class="mac-input" id="mac-s-url" placeholder="https://..." value="${escA(s.apiUrl)}"></div><div class="mac-fg"><label class="mac-fl">API Key</label><input class="mac-input" id="mac-s-key" type="password" value="${escA(s.apiKey)}"></div><div class="mac-fg"><label class="mac-fl">模型</label><input class="mac-input" id="mac-s-model" value="${escA(s.apiModel)}"></div><div class="mac-fr"><label>Function Calling</label><label class="mac-tog"><input type="checkbox" id="mac-s-fc"${s.useFunctionCalling?' checked':''}><span class="mac-tog-s"></span></label></div><div class="mac-fr"><label>GM Agent</label><label class="mac-tog"><input type="checkbox" id="mac-s-gm"${s.gmEnabled?' checked':''}><span class="mac-tog-s"></span></label></div><div style="display:flex;gap:6px"><button class="mac-btn mac-btn-sm mac-btn-p" id="mac-s-api-save">💾 保存</button><button class="mac-btn mac-btn-sm mac-btn-s" id="mac-s-api-test">🔗 测试</button></div><div class="mac-apir" id="mac-s-api-res"></div></div></div><div class="mac-sec"><div class="mac-sec-hd" data-t="mac-s-game-body">游戏参数 <span class="mac-sec-arr">▶</span></div><div id="mac-s-game-body" class="mac-sec-bd" style="display:none"><div class="mac-fr"><label>最大轮数</label><input class="mac-input mac-input-sm" id="mac-s-rounds" type="number" value="${s.maxRounds}"></div><div class="mac-fr"><label>延迟(ms)</label><input class="mac-input mac-input-sm" id="mac-s-delay" type="number" value="${s.stepDelay}"></div><div class="mac-fr"><label>Agent步数</label><input class="mac-input mac-input-sm" id="mac-s-steps" type="number" value="${s.maxSteps}"></div><div class="mac-fr"><label>LLM超时</label><input class="mac-input mac-input-sm" id="mac-s-timeout" type="number" value="${s.llmTimeout}"></div></div></div><div class="mac-sec"><div class="mac-sec-hd" data-t="mac-s-ui-body">界面与消息 <span class="mac-sec-arr">▶</span></div><div id="mac-s-ui-body" class="mac-sec-bd" style="display:none"><div class="mac-fr"><label>游戏消息</label><select class="mac-input" id="mac-s-chatmode" style="width:240px"><option value="both"${s.tavernChatMode==='panel'||s.tavernChatMode==='tavern'?'':' selected'}>全屏面板 + 酒馆主聊天</option><option value="panel"${s.tavernChatMode==='panel'?' selected':''}>仅全屏面板</option><option value="tavern"${s.tavernChatMode==='tavern'?' selected':''}>仅酒馆主聊天</option></select></div><p style="font-size:11px;color:var(--txt3);margin:8px 0 0">避免主聊天被刷屏时可选择「仅全屏」。</p></div></div><div class="mac-sec"><div class="mac-sec-hd" data-t="mac-s-player-body">玩家设置 <span class="mac-sec-arr">▶</span></div><div id="mac-s-player-body" class="mac-sec-bd" style="display:none"><div class="mac-fr"><label>名称</label><input class="mac-input" id="mac-s-uname" value="${escA(s.userName)}" style="width:150px"></div><div class="mac-fr"><label>头像</label><input class="mac-input mac-input-xs" id="mac-s-uicon" value="${escA(s.userIcon)}"></div></div></div><div class="mac-sec"><div class="mac-sec-hd" data-t="mac-s-prompt-body">Prompt 模板 <span class="mac-sec-arr">▶</span></div><div id="mac-s-prompt-body" class="mac-sec-bd" style="display:none"><div class="mac-fg"><label class="mac-fl">系统提示词</label><textarea class="mac-ta" id="mac-s-sysprompt" rows="3">${esc(pt('systemPrompt'))}</textarea></div><div class="mac-fg"><label class="mac-fl">工具描述</label><textarea class="mac-ta" id="mac-s-toolsdesc" rows="5">${esc(pt('toolsDesc'))}</textarea></div><div class="mac-fg"><label class="mac-fl">输出格式</label><textarea class="mac-ta" id="mac-s-outfmt" rows="2">${esc(pt('outputFormat'))}</textarea></div><div class="mac-fg"><label class="mac-fl">环境叙述</label><textarea class="mac-ta" id="mac-s-envnarr" rows="4">${esc(pt('envNarrations'))}</textarea></div><div style="display:flex;gap:6px"><button class="mac-btn mac-btn-sm mac-btn-p" id="mac-s-pt-save">💾 保存</button><button class="mac-btn mac-btn-sm mac-btn-w" id="mac-s-pt-reset">🔄 默认</button></div></div></div><div class="mac-sec"><div class="mac-sec-hd" data-t="mac-s-save-body">存档管理 <span class="mac-sec-arr">▶</span></div><div id="mac-s-save-body" class="mac-sec-bd" style="display:none">${[1,2,3].map(i=>`<div class="mac-save"><span class="mac-save-l">槽位${i}</span><span class="mac-save-i" id="mac-si-${i}">${getSaveInfo(i)}</span><button class="mac-btn mac-btn-sm mac-btn-s mac-sv" data-slot="${i}">💾</button><button class="mac-btn mac-btn-sm mac-btn-s mac-ld" data-slot="${i}">📂</button></div>`).join('')}</div></div></div>`;
+        const lp=`<div class="mac-page" id="mac-page-logs"><div style="display:flex;align-items:center;gap:6px;margin-bottom:8px"><span style="font-size:12px;color:var(--txt3)">最近 200 条</span><button class="mac-btn mac-btn-sm mac-btn-s" id="mac-l-clear" style="margin-left:auto">🗑️</button></div><div class="mac-logbox" id="mac-l-box"></div></div>`;
+        const app=document.createElement('div');app.id='mac-app';app.innerHTML=`${sb}<div id="mac-main">${hd}<div id="mac-content">${dp}${gp}${ap}${wp}${ep}${sp}${lp}</div></div>`;document.body.appendChild(app);
+        const mini=document.createElement('div');mini.id='mac-mini-hud';mini.innerHTML=`<span class="mini-dot" id="mac-mini-dot"></span><span id="mac-mini-text">Multi-Agent v${VERSION}</span>`;document.body.appendChild(mini);
+        bindAllEvents();renderAgentConfigs();renderScenarios();updateAll();renderLogs();updateEval();
     }
 
-    function getWorldTpl() {
-        const pt = cfg().promptTemplates || {};
-        try {
-            const parsed = JSON.parse(pt.worldTpl || '{}');
-            if (parsed.locations && parsed.items && parsed.enemies) return parsed;
-        } catch (_) {}
-        return JSON.parse(JSON.stringify(WORLD_TPL));
+    // ── Floating HUD ──
+
+    function createHUD(){
+        if(document.getElementById('mac-hud'))return;
+        const h=document.createElement('div');h.id='mac-hud';
+        h.innerHTML=`<div id="mac-hud-drag"><span id="mac-hud-title">${IC.logo} Multi-Agent</span><span id="mac-hud-round">R0</span><button id="mac-hud-toggle" title="收起">−</button></div><div id="mac-hud-body"><div id="mac-hud-agents"></div><div id="mac-hud-user-sec" class="mac-hud-user-section" style="display:none"><div class="mac-hud-input-wrap"><input id="mac-hud-input" type="text" class="mac-hud-input" placeholder="等待中…" disabled><button id="mac-hud-send" class="mac-hud-send" disabled>➤</button></div></div><div id="mac-hud-status">未初始化</div><div id="mac-hud-btns"><button class="mac-hud-btn" id="mac-hud-init" title="初始化">⟳</button><button class="mac-hud-btn" id="mac-hud-start" disabled title="开始">▶</button><button class="mac-hud-btn" id="mac-hud-pause" disabled title="暂停">⏸</button><button class="mac-hud-btn" id="mac-hud-stop" disabled title="停止">⏹</button></div></div>`;
+        document.body.appendChild(h);
+        try{const j=JSON.parse(localStorage.getItem(HUD_LAYOUT_KEY)||'null');if(j&&j.left&&j.top){h.style.position='fixed';h.style.left=j.left;h.style.top=j.top;h.style.right='auto';h.style.bottom='auto';}}catch(_){}
+        makeDraggable(h,document.getElementById('mac-hud-drag'));
+        document.getElementById('mac-hud-toggle').addEventListener('click',()=>{const b=document.getElementById('mac-hud-body');const btn=document.getElementById('mac-hud-toggle');const v=b.style.display==='none';b.style.display=v?'':'none';btn.textContent=v?'−':'+';});
+        document.getElementById('mac-hud-init').addEventListener('click',doInit);
+        document.getElementById('mac-hud-start').addEventListener('click',doStart);
+        document.getElementById('mac-hud-pause').addEventListener('click',doPause);
+        document.getElementById('mac-hud-stop').addEventListener('click',doStop);
+        document.getElementById('mac-hud-send').addEventListener('click',submitUserAction);
+        document.getElementById('mac-hud-input').addEventListener('keydown',e=>{if(e.key==='Enter')submitUserAction();});
     }
 
-    function pt(key) {
-        const v = (cfg().promptTemplates || {})[key];
-        return v !== undefined ? v : (DEFAULT_PROMPT_TEMPLATES[key] ?? '');
+    function makeDraggable(el,handle){let drag=false,ox=0,oy=0;handle.style.cursor='grab';handle.addEventListener('mousedown',e=>{if(e.target.tagName==='BUTTON')return;drag=true;ox=e.clientX-el.offsetLeft;oy=e.clientY-el.offsetTop;handle.style.cursor='grabbing';e.preventDefault();});document.addEventListener('mousemove',e=>{if(!drag)return;el.style.left=Math.max(0,Math.min(window.innerWidth-el.offsetWidth,e.clientX-ox))+'px';el.style.top=Math.max(0,Math.min(window.innerHeight-el.offsetHeight,e.clientY-oy))+'px';el.style.right='auto';el.style.bottom='auto';});document.addEventListener('mouseup',()=>{if(!drag)return;drag=false;handle.style.cursor='grab';if(el.id==='mac-hud'){try{localStorage.setItem(HUD_LAYOUT_KEY,JSON.stringify({left:el.style.left,top:el.style.top}));}catch(_){}}});}
+
+    function ensureChatBar(){
+        if(document.getElementById('mac-chat-bar'))return;
+        const st=getSTChat();if(!st)return;
+        const bar=document.createElement('div');bar.id='mac-chat-bar';bar.style.display='none';
+        bar.innerHTML='<div class="mac-hud-input-wrap"><input id="mac-chat-input" type="text" class="mac-hud-input" placeholder="等待中…" disabled style="font-size:14px;padding:8px 12px"><button class="mac-hud-send" onclick="return false" id="mac-chat-send" disabled>➤</button></div>';
+        st.parentElement?.appendChild(bar);
+        document.getElementById('mac-chat-send')?.addEventListener('click',submitUserAction);
+        document.getElementById('mac-chat-input')?.addEventListener('keydown',e=>{if(e.key==='Enter')submitUserAction();});
     }
 
-    function saveCfg() { SillyTavern.getContext().saveSettingsDebounced(); }
-
-    function escHtml(s) {
-        return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-    }
-    function escAttr(s) { return String(s || '').replace(/"/g, '&quot;'); }
-
-    function getSTCharacters() {
-        try { return SillyTavern.getContext().characters || []; }
-        catch (e) { addLog(`获取ST角色列表失败: ${e.message}`, 'warn'); return []; }
+    function updateHUD(){
+        const rEl=document.getElementById('mac-hud-round');if(rEl)rEl.textContent=`R${G.round}`;
+        const aEl=document.getElementById('mac-hud-agents');
+        if(aEl){const all=[...(G.userAgent?[G.userAgent]:[]),...G.agents];aEl.innerHTML=all.map((a,i)=>{const isU=a.id==='user';const pct=a.maxHp>0?Math.round(a.hp/a.maxHp*100):0;const loc=G.world?.locations?.[a.location]?.name||a.location||'?';const bg=pct>50?'#7ec89a':pct>25?'#dbb866':'#d47070';return`<div class="hud-agent${isU?' hud-user':''}${!isU&&G.running&&i-1===G.curIdx?' hud-active':''}"><span class="hud-icon">${a.icon}</span><span class="hud-name">${a.name}</span><span class="hud-hp">${a.hp}/${a.maxHp}</span><div class="hud-bar"><div class="hud-bar-fill" style="width:${pct}%;background:${bg}"></div></div><span class="hud-loc">${loc}</span></div>`;}).join('');}
+        const sEl=document.getElementById('mac-hud-status');if(sEl)sEl.textContent=!G.inited?'未初始化':!G.running?'已停止':G.waitingForUser?'等待行动…':G.paused?'已暂停':`运行中 R${G.round}`;
+        ['mac-hud-start'].forEach(id=>{const e=document.getElementById(id);if(e)e.disabled=!G.inited||G.running;});
+        ['mac-hud-pause'].forEach(id=>{const e=document.getElementById(id);if(e)e.disabled=!G.running;});
+        ['mac-hud-stop'].forEach(id=>{const e=document.getElementById(id);if(e)e.disabled=!G.running;});
     }
 
-    async function getSTWorldInfoNames() {
-        try {
-            const { getRequestHeaders } = SillyTavern.getContext();
-            const resp = await fetch('/api/settings/get', { method: 'POST', headers: getRequestHeaders(), body: JSON.stringify({}) });
-            if (!resp.ok) throw new Error(`API ${resp.status}`);
-            return (await resp.json()).world_names || [];
-        } catch (e) { addLog(`获取 World Info 列表失败: ${e.message}`, 'warn'); return []; }
+    // ── Common updates ──
+
+    function updateAll(){updateDashboard();updateHUD();ensureChatBar();
+        const md=document.getElementById('mac-mini-dot'),mt=document.getElementById('mac-mini-text');
+        if(md)md.className=`mini-dot${G.running?' on':''}`;if(mt)mt.textContent=G.running?`R${G.round} ${G.waitingForUser?'等待行动':'运行中'}`:`Multi-Agent v${VERSION}`;
+    }
+    function updateDashboard(){
+        const m=getMetrics(),set=(id,v)=>{const e=document.getElementById(id);if(e)e.textContent=v;};
+        set('mac-d-rounds',G.round);set('mac-d-llm',m.llmCalls);set('mac-d-tools',m.toolCalls);set('mac-d-fc',m.fcRate>0?m.fcRate+'%':'—');
+        set('mac-d-status',!G.inited?'未初始化':!G.running?'已停止':G.waitingForUser?'等待行动':G.paused?'已暂停':`运行中`);
+        const sEl=document.getElementById('mac-d-status');if(sEl)sEl.className='mac-badge '+(!G.inited?'mac-badge-r':!G.running?'mac-badge-y':G.waitingForUser?'mac-badge-b':G.paused?'mac-badge-y':'mac-badge-g');
+        ['mac-d-init'].forEach(id=>{const e=document.getElementById(id);if(e)e.disabled=G.running;});
+        ['mac-d-start'].forEach(id=>{const e=document.getElementById(id);if(e)e.disabled=!G.inited||G.running;});
+        ['mac-d-pause'].forEach(id=>{const e=document.getElementById(id);if(e)e.disabled=!G.running;});
+        ['mac-d-stop'].forEach(id=>{const e=document.getElementById(id);if(e)e.disabled=!G.running;});
+        const agEl=document.getElementById('mac-d-agents');
+        if(agEl){const all=[...(G.userAgent?[G.userAgent]:[]),...G.agents];agEl.innerHTML=all.map(a=>{const pct=a.maxHp>0?Math.round(a.hp/a.maxHp*100):0;const loc=G.world?.locations?.[a.location]?.name||a.location||'?';const bg=pct>50?'#7ec89a':pct>25?'#dbb866':'#d47070';return`<div class="mac-ag-card"><div class="mac-ag-head"><span class="mac-ag-icon">${a.icon}</span><span class="mac-ag-name">${a.name}</span><span class="mac-ag-role">${a.role}</span></div><div class="mac-hp"><div class="mac-hp-fill" style="width:${pct}%;background:${bg}"></div></div><div class="mac-ag-info">${loc} · HP ${a.hp}/${a.maxHp} · 💰${a.gold}</div></div>`;}).join('');}
+        const rEl=document.getElementById('mac-d-recent');if(rEl){const rec=G.actionsHistory.slice(-8).reverse();rEl.innerHTML=rec.length?rec.map(h=>`<div style="padding:3px 0;border-bottom:1px solid rgba(195,155,60,.06)">[R${h.round}] ${h.agentName}: <span style="color:${TC[h.tool]||'#6a6258'}">${TL[h.tool]||h.tool}</span> → ${esc((h.observation||'').substring(0,60))}</div>`).join(''):'暂无';}
     }
 
-    async function loadSTWorldInfoFile(name) {
-        if (!name || !name.trim()) return null;
-        try {
-            const { getRequestHeaders } = SillyTavern.getContext();
-            const resp = await fetch('/api/worldinfo/get', {
-                method: 'POST', headers: getRequestHeaders(),
-                body: JSON.stringify({ name: name.trim() })
-            });
-            if (!resp.ok) throw new Error(`API ${resp.status}`);
-            const data = await resp.json();
-            const entries = data.entries || data;
-            const items = typeof entries === 'object' ? Object.values(entries) : [];
-            return items.map(e => e.content || '').filter(Boolean).join('\n');
-        } catch (e) { addLog(`加载 World Info "${name}" 失败: ${e.message}`, 'warn'); return null; }
+    function navigateTo(page){G.currentPage=page;document.querySelectorAll('.mac-page').forEach(e=>e.classList.remove('active'));document.querySelectorAll('.mac-nav').forEach(e=>e.classList.remove('active'));const pEl=document.getElementById(`mac-page-${page}`),nEl=document.querySelector(`.mac-nav[data-page="${page}"]`);if(pEl)pEl.classList.add('active');if(nEl){nEl.classList.add('active');const b=nEl.querySelector('.mac-nav-badge');if(b)b.style.display='none';}const titles={dashboard:'仪表盘',game:'游戏',agents:'智能体配置',world:'世界编辑',eval:'评估系统',settings:'设置',logs:'系统日志'};const tEl=document.getElementById('mac-header-title');if(tEl)tEl.textContent=titles[page]||page;if(page==='game'){const c=document.getElementById('mac-game-chat');if(c)c.scrollTop=c.scrollHeight;}if(page==='eval')updateEval();if(page==='logs')renderLogs();}
+    function toggleApp(){const a=document.getElementById('mac-app'),m=document.getElementById('mac-mini-hud');if(!a)return;const show=!a.classList.contains('visible');a.classList.toggle('visible',show);if(m)m.style.display=show?'none':'flex';const b=document.getElementById('mac-topbar-btn');if(b)b.classList.toggle('active',show);}
+
+    function renderAgentConfigs(){const el=document.getElementById('mac-a-list');if(!el)return;const s=cfg();el.innerHTML=s.agents.map((a,i)=>`<div class="mac-acfg"><div class="mac-acfg-hd"><input class="mac-input mac-input-xs mac-ai" value="${escA(a.icon)}" data-i="${i}"><input class="mac-input mac-an" value="${escA(a.name)}" placeholder="名称" data-i="${i}" style="flex:1"><input class="mac-input mac-ar" value="${escA(a.role)}" placeholder="角色" data-i="${i}" style="width:80px"><button class="mac-btn-ico mac-adel" data-i="${i}">🗑️</button></div><textarea class="mac-ta mac-ap" rows="3" data-i="${i}" placeholder="角色提示词…">${esc(a.prompt)}</textarea></div>`).join('');el.querySelectorAll('.mac-adel').forEach(b=>b.addEventListener('click',()=>{const i=parseInt(b.dataset.i);if(s.agents.length<=1)return;if(confirm(`删除"${s.agents[i].name}"？`)){s.agents.splice(i,1);saveCfg();renderAgentConfigs();}}));}
+    function renderScenarios(){const el=document.getElementById('mac-w-scn');if(!el)return;const cur=cfg().scenario||'rpg';el.innerHTML=Object.entries(SCENARIOS).map(([id,sc])=>`<div class="mac-scn${id===cur?' sel':''}" data-sc="${id}"><div class="mac-scn-ico">${sc.icon}</div><div class="mac-scn-nm">${sc.name}</div><div class="mac-scn-ds">${sc.desc}</div></div>`).join('');el.querySelectorAll('.mac-scn').forEach(c=>c.addEventListener('click',()=>{const s=cfg();s.scenario=c.dataset.sc;s.agents=JSON.parse(JSON.stringify(SCENARIOS[s.scenario].agents));s.promptTemplates=s.promptTemplates||{};s.promptTemplates.worldTpl=JSON.stringify(SCENARIOS[s.scenario].world,null,2);saveCfg();renderScenarios();renderAgentConfigs();const t=document.getElementById('mac-w-tpl');if(t)t.value=s.promptTemplates.worldTpl;}));const t=document.getElementById('mac-w-tpl');if(t)t.value=cfg().promptTemplates?.worldTpl||JSON.stringify(getScenario().world,null,2);}
+    function renderLogs(){const el=document.getElementById('mac-l-box');if(!el)return;el.innerHTML=LOG.slice(-200).map(e=>`<div class="mac-log-e mac-log-${e.level}">[${e.ts}] ${esc(e.msg)}</div>`).join('');el.scrollTop=el.scrollHeight;}
+    function updateEval(){const el=document.getElementById('mac-e-met');if(!el)return;const m=getMetrics();el.innerHTML=[{l:'回合',v:m.rounds,c:'var(--txt)'},{l:'LLM',v:m.llmCalls,c:'var(--gold-l)'},{l:'工具',v:m.toolCalls,c:'var(--ok)'},{l:'FC',v:m.fcCalls,c:'#b08ee6'},{l:'文本',v:m.textCalls,c:'var(--warn)'},{l:'FC率',v:m.fcRate+'%',c:'var(--ok)'},{l:'均响应',v:m.avgMs+'ms',c:'var(--gold-l)'},{l:'错误',v:m.errors,c:'var(--err)'},{l:'胜',v:m.successes,c:'var(--ok)'},{l:'败',v:m.failures,c:'var(--err)'}].map(x=>`<div class="mac-metric"><div class="mac-metric-v" style="color:${x.c}">${x.v}</div><div class="mac-metric-l">${x.l}</div></div>`).join('');}
+    async function renderWIList(){const el=document.getElementById('mac-wi-list');if(!el)return;el.innerHTML='<span style="font-size:12px;color:var(--txt3)">加载中…</span>';const names=await getSTWorldInfoNames();if(!names.length){el.innerHTML='<span style="font-size:12px;color:var(--txt3)">无</span>';return;}const sel=cfg().worldInfoSelected||[];el.innerHTML=names.map(n=>`<label class="mac-wi-item"><input type="checkbox" class="mac-wic" value="${escA(n)}"${sel.includes(n)?' checked':''}> ${esc(n)}</label>`).join('');}
+
+    // ── Event Binding ──
+
+    function bindAllEvents(){
+        document.querySelectorAll('.mac-nav').forEach(b=>b.addEventListener('click',()=>navigateTo(b.dataset.page)));
+        document.getElementById('mac-minimize')?.addEventListener('click',toggleApp);
+        document.getElementById('mac-close')?.addEventListener('click',toggleApp);
+        document.getElementById('mac-mini-hud')?.addEventListener('click',toggleApp);
+        document.getElementById('mac-d-init')?.addEventListener('click',doInit);
+        document.getElementById('mac-d-start')?.addEventListener('click',doStart);
+        document.getElementById('mac-d-pause')?.addEventListener('click',doPause);
+        document.getElementById('mac-d-stop')?.addEventListener('click',doStop);
+        document.getElementById('mac-g-send')?.addEventListener('click',submitUserAction);
+        document.getElementById('mac-g-input')?.addEventListener('keydown',e=>{if(e.key==='Enter')submitUserAction();});
+        document.getElementById('mac-a-add')?.addEventListener('click',()=>{const s=cfg();s.agents.push({id:`agent_${Date.now()}`,name:`角色${s.agents.length+1}`,icon:'🤖',role:'冒险者',hp:100,maxHp:100,location:Object.keys(getScenario().world.locations)[0],inventory:[],gold:0,priority:s.agents.length+1,prompt:''});saveCfg();renderAgentConfigs();});
+        document.getElementById('mac-a-save')?.addEventListener('click',()=>{const s=cfg();document.querySelectorAll('.mac-ai').forEach((el,i)=>{if(!s.agents[i])return;s.agents[i].icon=el.value.trim()||'🤖';s.agents[i].name=document.querySelectorAll('.mac-an')[i]?.value.trim()||`角色${i+1}`;s.agents[i].role=document.querySelectorAll('.mac-ar')[i]?.value.trim()||'冒险者';s.agents[i].prompt=document.querySelectorAll('.mac-ap')[i]?.value.trim()||'';s.agents[i].id=s.agents[i].id||'a_'+i;s.agents[i].maxHp=s.agents[i].maxHp||100;s.agents[i].priority=i+1;});saveCfg();addLog('角色已保存');});
+        document.getElementById('mac-w-save')?.addEventListener('click',()=>{const s=cfg();s.promptTemplates=s.promptTemplates||{};s.promptTemplates.worldTpl=document.getElementById('mac-w-tpl')?.value||'';saveCfg();});
+        document.getElementById('mac-w-reset')?.addEventListener('click',()=>{const t=JSON.stringify(getScenario().world,null,2);const e=document.getElementById('mac-w-tpl');if(e)e.value=t;const s=cfg();s.promptTemplates=s.promptTemplates||{};s.promptTemplates.worldTpl=t;saveCfg();});
+        document.getElementById('mac-wi-ref')?.addEventListener('click',renderWIList);
+        document.getElementById('mac-wi-en')?.addEventListener('click',async()=>{const ch=[...document.querySelectorAll('.mac-wic:checked')].map(e=>e.value);if(!ch.length)return;const s=cfg();s.worldInfoSelected=ch;const ts=[];for(const n of ch){const t=await loadSTWorldInfoFile(n);if(t)ts.push(t);}s.worldInfo=ts.join('\n---\n').substring(0,2000);saveCfg();const d=document.getElementById('mac-wi-disp');if(d)d.textContent=s.worldInfo.substring(0,500);});
+        document.getElementById('mac-wi-clr')?.addEventListener('click',()=>{const s=cfg();s.worldInfo='';s.worldInfoSelected=[];saveCfg();document.querySelectorAll('.mac-wic').forEach(e=>e.checked=false);const d=document.getElementById('mac-wi-disp');if(d)d.textContent='暂无';});
+        document.getElementById('mac-s-api-save')?.addEventListener('click',()=>{const s=cfg();s.apiUrl=document.getElementById('mac-s-url')?.value.trim()||'';s.apiKey=document.getElementById('mac-s-key')?.value.trim()||'';s.apiModel=document.getElementById('mac-s-model')?.value.trim()||'gpt-4o-mini';s.useFunctionCalling=document.getElementById('mac-s-fc')?.checked??true;s.gmEnabled=document.getElementById('mac-s-gm')?.checked??true;G.gmEnabled=s.gmEnabled;saveCfg();});
+        document.getElementById('mac-s-api-test')?.addEventListener('click',async()=>{const url=document.getElementById('mac-s-url')?.value.trim(),key=document.getElementById('mac-s-key')?.value.trim(),model=document.getElementById('mac-s-model')?.value.trim()||'gpt-4o-mini',res=document.getElementById('mac-s-api-res');if(!url){showApi(res,'请填写API地址','err');return;}showApi(res,'⏳ 测试中…','info');try{const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json',...(key?{Authorization:`Bearer ${key}`}:{})},body:JSON.stringify({model,messages:[{role:'user',content:'Hi'}],max_tokens:5})});if(r.ok)showApi(res,'✅ 连接成功，响应正常。','ok');else{const det=await parseApiErrorBody(r);showApi(res,friendlyHttp(r.status,det),'err');}}catch(e){showApi(res,e.name==='TypeError'&&/fetch/i.test(e.message)?'网络错误：请检查地址与跨域/CORS。':`❌ ${e.message}`,'err');}});
+        document.getElementById('mac-s-chatmode')?.addEventListener('change',function(){cfg().tavernChatMode=this.value;saveCfg();invalidateSTChat();});
+        ['mac-s-rounds','mac-s-delay','mac-s-steps','mac-s-timeout'].forEach(id=>{document.getElementById(id)?.addEventListener('change',function(){const s=cfg(),mp={'mac-s-rounds':'maxRounds','mac-s-delay':'stepDelay','mac-s-steps':'maxSteps','mac-s-timeout':'llmTimeout'};s[mp[id]]=parseInt(this.value)||s[mp[id]];saveCfg();});});
+        document.getElementById('mac-s-pt-save')?.addEventListener('click',()=>{const s=cfg(),t=s.promptTemplates||{};t.systemPrompt=document.getElementById('mac-s-sysprompt')?.value||t.systemPrompt;t.toolsDesc=document.getElementById('mac-s-toolsdesc')?.value||t.toolsDesc;t.outputFormat=document.getElementById('mac-s-outfmt')?.value||t.outputFormat;t.envNarrations=document.getElementById('mac-s-envnarr')?.value||t.envNarrations;s.promptTemplates=t;saveCfg();});
+        document.getElementById('mac-s-pt-reset')?.addEventListener('click',()=>{if(!confirm('恢复默认？'))return;cfg().promptTemplates={...DEFAULT_PROMPTS};saveCfg();const sv=(id,k)=>{const e=document.getElementById(id);if(e)e.value=pt(k);};sv('mac-s-sysprompt','systemPrompt');sv('mac-s-toolsdesc','toolsDesc');sv('mac-s-outfmt','outputFormat');sv('mac-s-envnarr','envNarrations');});
+        document.querySelectorAll('.mac-sv').forEach(b=>b.addEventListener('click',()=>saveGame(parseInt(b.dataset.slot))));
+        document.querySelectorAll('.mac-ld').forEach(b=>b.addEventListener('click',()=>loadGame(parseInt(b.dataset.slot))));
+        document.getElementById('mac-e-run')?.addEventListener('click',()=>runAutoTest(parseInt(document.getElementById('mac-e-rounds')?.value)||5));
+        document.getElementById('mac-e-reset')?.addEventListener('click',resetMetrics);
+        document.getElementById('mac-l-clear')?.addEventListener('click',()=>{LOG=[];renderLogs();});
+        document.querySelectorAll('.mac-sec-hd').forEach(hd=>{hd.addEventListener('click',()=>{const t=document.getElementById(hd.dataset.t);const a=hd.querySelector('.mac-sec-arr');if(!t)return;const o=t.style.display!=='none';t.style.display=o?'none':'block';if(a)a.textContent=o?'▶':'▼';});});
     }
-
-    function saveGame(slot) {
-        if (!G.world) { addLog('游戏未初始化', 'warn'); return; }
-        const data = { round: G.round, agents: G.agents, userAgent: G.userAgent, world: G.world, ts: new Date().toLocaleString('zh-CN') };
-        localStorage.setItem(`${SAVE_KEY}_${slot}`, JSON.stringify(data));
-        addLog(`存档成功（槽位 ${slot}）`, 'info');
-        postSystemMsg(`💾 游戏已存档（槽位 ${slot}，第 ${G.round} 轮）`);
-        [1, 2, 3].forEach(i => { const el = document.getElementById(`mac-save-info-${i}`); if (el) el.textContent = getSaveInfo(i); });
-    }
-
-    function loadGame(slot) {
-        const raw = localStorage.getItem(`${SAVE_KEY}_${slot}`);
-        if (!raw) { addLog(`槽位 ${slot} 无存档`, 'warn'); return; }
-        try {
-            const data = JSON.parse(raw);
-            G.round = data.round || 0; G.agents = data.agents || []; G.userAgent = data.userAgent || null;
-            G.world = data.world; G.inited = true;
-            updateHUD();
-            postSystemMsg(`📂 存档已读取（槽位 ${slot}，第 ${G.round} 轮，${data.ts}）`);
-            postSystemMsg(`角色: ${G.agents.map(a => `${a.icon}${a.name} HP:${a.hp}/${a.maxHp}`).join('、')}`);
-            addLog(`读档成功（槽位 ${slot}）`, 'info');
-        } catch (e) { addLog(`读档失败: ${e.message}`, 'error'); }
-    }
-
-    function getSaveInfo(slot) {
-        const raw = localStorage.getItem(`${SAVE_KEY}_${slot}`);
-        if (!raw) return '空';
-        try { const d = JSON.parse(raw); return `第${d.round}轮 ${d.ts || ''}`; } catch (_) { return '损坏'; }
-    }
-
-    function getChatEl() {
-        return document.getElementById('chat') || document.querySelector('.chat');
-    }
-
-    // ══════════════════════════════════════════════════════════
-    //  层二：游戏引擎层
-    // ══════════════════════════════════════════════════════════
-
-    function resetGame() {
-        const s = cfg();
-        const wt = getWorldTpl();
-        G.world = JSON.parse(JSON.stringify(wt));
-        G.agents = s.agents.map(a => ({
-            ...JSON.parse(JSON.stringify(a)),
-            hp: a.maxHp || a.hp || 100, maxHp: a.maxHp || 100,
-            location: a.location || 'village', inventory: [...(a.inventory || [])], gold: a.gold || 0
-        }));
-        G.userAgent = {
-            id: 'user', name: s.userName || '玩家', icon: s.userIcon || '👤',
-            role: '主角', hp: 100, maxHp: 100, location: 'village',
-            inventory: ['healing_potion'], gold: 20
-        };
-        G.round = 0; G.curIdx = 0; G.actionsHistory = [];
-        G.running = false; G.paused = false; G.stopReq = false; G.inited = true;
-        G.waitingForUser = false; G.userActionResolve = null;
-    }
-
-    function doInit() {
-        const s = cfg();
-        s.userName = document.getElementById('mac-cfg-username')?.value?.trim() || s.userName || '玩家';
-        s.userIcon = document.getElementById('mac-cfg-usericon')?.value?.trim() || s.userIcon || '👤';
-        saveCfg();
-        resetGame();
-        updateHUD();
-        postSystemMsg('═══ 🎮 游戏世界已初始化 ═══');
-        postSystemMsg(`🎮 你是主角！${G.userAgent.icon}${G.userAgent.name} | NPC配角: ${G.agents.map(a => `${a.icon}${a.name}`).join('、')}`);
-        postSystemMsg(`📍 路线A: ${pt('initRouteA')}`);
-        postSystemMsg(`📍 路线B: ${pt('initRouteB')}`);
-        postSystemMsg(`🎯 目标: ${pt('initGoal')}`);
-        addLog('游戏世界已初始化', 'info');
-        const startBtn = document.getElementById('mac-ext-start') || document.getElementById('mac-hud-start');
-        if (startBtn) startBtn.disabled = false;
-    }
-
-    function resolveId(W, type, name) {
-        if (!name || !W) return null;
-        const n = String(name).trim().toLowerCase();
-        if (type === 'location') {
-            for (const [id, loc] of Object.entries(W.locations || {})) {
-                if (id === n || (loc.name && loc.name.toLowerCase().includes(n))) return id;
-            }
-        }
-        if (type === 'item') {
-            for (const [id, it] of Object.entries(W.items || {})) {
-                if (id === n || (it.name && it.name.toLowerCase().includes(n))) return id;
-            }
-        }
-        if (type === 'enemy') {
-            for (const [id, en] of Object.entries(W.enemies || {})) {
-                if (id === n || (en.name && en.name.toLowerCase().includes(n))) return id;
-            }
-        }
-        if (type === 'agent') {
-            const all = [...(G.userAgent ? [G.userAgent] : []), ...G.agents];
-            for (const a of all) {
-                if (a.id === n || (a.name && a.name.includes(name)) || (a.name && a.name.toLowerCase().includes(n))) return a.id;
-            }
-        }
-        return null;
-    }
-
-    function resolveParams(W, tool, params) {
-        const p = { ...params };
-        if (tool === 'move' && p.destination) p.destination = resolveId(W, 'location', p.destination) || p.destination;
-        if (tool === 'attack' && p.target) p.target = resolveId(W, 'enemy', p.target) || resolveId(W, 'agent', p.target) || p.target;
-        if ((tool === 'pickup_item' || tool === 'pickup' || tool === 'take') && p.target) p.target = resolveId(W, 'item', p.target) || p.target;
-        if (tool === 'use_item' && p.item) p.item = resolveId(W, 'item', p.item) || p.item;
-        if ((tool === 'speak' || tool === 'interact') && p.to) p.to = resolveId(W, 'agent', p.to) || p.to;
-        if ((tool === 'speak' || tool === 'interact') && p.agent) p.agent = resolveId(W, 'agent', p.agent) || p.agent;
-        if (tool === 'inspect' && p.target) p.target = resolveId(W, 'item', p.target) || resolveId(W, 'location', p.target) || resolveId(W, 'enemy', p.target) || p.target;
-        return p;
-    }
-
-    function executeTool(agent, tool, params) {
-        const W = G.world;
-        const loc = W.locations[agent.location];
-
-        switch (tool) {
-            case 'move': {
-                let dest = params.destination;
-                if (dest && !W.locations[dest]) dest = resolveId(W, 'location', dest) || dest;
-                if (!W.locations[dest]) return `未知地点"${params.destination}"。可前往: ${loc.conn.map(c => `${W.locations[c].name}(${c})`).join(', ')}`;
-                if (!loc.conn.includes(dest)) return `不能从【${loc.name}】直接到达【${W.locations[dest].name}】。可前往: ${loc.conn.map(c => `${W.locations[c].name}(${c})`).join(', ')}`;
-                agent.location = dest;
-                const nl = W.locations[dest];
-                let r = `移动至【${nl.name}】。${nl.desc}`;
-                if (nl.enemies.length) r += ` ⚠️ 遭遇: ${nl.enemies.map(e => W.enemies[e].name).join('、')}！`;
-                if (nl.items.length)   r += ` 💎 地面有: ${nl.items.map(i => W.items[i].name).join('、')}`;
-                return r;
-            }
-            case 'search': {
-                if (!loc.items.length) return `在【${loc.name}】没找到任何物品。`;
-                const id = loc.items.shift();
-                agent.inventory.push(id);
-                return `在【${loc.name}】发现【${W.items[id].name}】，已加入背包！`;
-            }
-            case 'pickup_item': case 'pickup': case 'take': {
-                let tid = params.target || params.item;
-                if (tid && !W.items[tid]) tid = resolveId(W, 'item', tid) || tid;
-                if (!tid) return `请指定物品。地面: ${loc.items.map(i => `${W.items[i]?.name}(${i})`).join('、') || '无'}`;
-                if (!W.items[tid]) return `"${params.target || params.item}"不是有效物品。`;
-                const idx = loc.items.indexOf(tid);
-                if (idx === -1) return `【${loc.name}】地面没有"${tid}"。`;
-                loc.items.splice(idx, 1);
-                agent.inventory.push(tid);
-                return `拾取【${W.items[tid].name}】，已加入背包！`;
-            }
-            case 'attack': {
-                let tid = params.target;
-                if (tid && !loc.enemies.includes(tid)) tid = resolveId(W, 'enemy', tid) || tid;
-                if (loc.enemies.includes(tid)) {
-                    const en = W.enemies[tid];
-                    let dmg = agent.role === '战士' ? 30 : (agent.role === '法师' ? 20 : 25);
-                    if (agent.inventory.includes('magic_sword')) dmg += 25;
-                    if (agent.role === '法师' && agent.location === 'cave') dmg += 20;
-                    en.hp -= dmg;
-                    if (en.hp <= 0) {
-                        loc.enemies = loc.enemies.filter(e => e !== tid);
-                        agent.gold += en.reward;
-                        W.enemies[tid].hp = en.maxHp;
-                        return `对【${en.name}】造成${dmg}伤害，将其击败！获得${en.reward}金币。💰总计:${agent.gold}`;
-                    }
-                    const taken = Math.max(0, en.dmg - (agent.role === '战士' ? 5 : 0));
-                    agent.hp = Math.max(0, agent.hp - taken);
-                    W.enemies[tid].hp = en.hp;
-                    return `对【${en.name}】造成${dmg}伤害(剩余HP:${en.hp})。反击受到${taken}伤害，当前HP:${agent.hp}/${agent.maxHp}`;
-                }
-                const allActors = [...(G.userAgent ? [G.userAgent] : []), ...G.agents];
-                let tgtAgent = allActors.find(a => a && (a.id === tid || a.name === tid));
-                if (!tgtAgent && tid) tgtAgent = allActors.find(a => a && resolveId(null, 'agent', tid) === a.id);
-                if (tgtAgent && tgtAgent.id !== agent.id && tgtAgent.location === agent.location && tgtAgent.hp > 0) {
-                    const dmg = agent.role === '战士' ? 25 : 20;
-                    tgtAgent.hp = Math.max(0, tgtAgent.hp - dmg);
-                    broadcastEvent(agent, tgtAgent.id, `（${agent.name}攻击了你，造成${dmg}伤害）`);
-                    return `对【${tgtAgent.name}】造成${dmg}伤害。${tgtAgent.name}剩余HP:${tgtAgent.hp}/${tgtAgent.maxHp}`;
-                }
-                return `【${loc.name}】没有"${params.target}"。`;
-            }
-            case 'interact': case 'speak': {
-                const allActors = [...(G.userAgent ? [G.userAgent] : []), ...G.agents];
-                const agentParam = params.agent || params.to;
-                let tgt = allActors.find(a => a && (a.id === agentParam || a.name === agentParam));
-                if (!tgt && agentParam) tgt = allActors.find(a => a && resolveId(null, 'agent', agentParam) === a.id);
-                if (!tgt) return `找不到"${agentParam}"。可用: ${allActors.map(a => `${a.name}(${a.id})`).join(', ')}`;
-                const msg = params.message || params.text || '';
-                if (msg) broadcastEvent(agent, tgt.id, msg);
-                return `对${tgt.icon}${tgt.name}说："${msg}"`;
-            }
-            case 'narrate': {
-                const text = params.text || params.message || '';
-                return text ? `【${agent.name}】${text}` : '（无叙述内容）';
-            }
-            case 'inspect': {
-                let t = params.target;
-                if (t && !W.items[t] && !W.locations[t] && !W.enemies[t]) t = resolveId(W, 'item', t) || resolveId(W, 'location', t) || resolveId(W, 'enemy', t) || t;
-                if (W.items[t])     return `【${W.items[t].name}】: 效果=${W.items[t].effect}, 价值=${W.items[t].val}`;
-                if (W.locations[t]) return `【${W.locations[t].name}】: ${W.locations[t].desc}`;
-                if (W.enemies[t])   return `【${W.enemies[t].name}】: HP=${W.enemies[t].hp}/${W.enemies[t].maxHp}`;
-                return `"${t}"没有详细信息。`;
-            }
-            case 'use_item': {
-                let iid = params.item;
-                if (iid && !agent.inventory.includes(iid)) iid = resolveId(W, 'item', iid) || iid;
-                if (!agent.inventory.includes(iid)) return `背包没有"${iid}"。`;
-                const item = W.items[iid];
-                if (item.effect === 'heal') {
-                    const h = Math.min(item.val, agent.maxHp - agent.hp);
-                    agent.hp += h;
-                    agent.inventory = agent.inventory.filter(i => i !== iid);
-                    return `使用【${item.name}】，恢复${h}HP (当前:${agent.hp}/${agent.maxHp})`;
-                }
-                return `使用【${item.name}】，${item.effect}效果已激活`;
-            }
-            case 'rest': {
-                const h = Math.min(20, agent.maxHp - agent.hp);
-                agent.hp += h;
-                return `在【${loc.name}】休息，恢复${h}HP (当前:${agent.hp}/${agent.maxHp})`;
-            }
-            case 'complete_turn':
-                return `结束回合。总结：${params.summary || '完成行动'}`;
-            default: {
-                const unknownTool = String(tool).toLowerCase();
-                const speakKeywords = ['insult', 'curse', 'scold', 'apologize', 'greet', 'taunt', 'chat', 'ask', 'say', 'talk', 'yell', 'shout', 'whisper', 'mock', 'praise', 'threaten'];
-                if (speakKeywords.some(k => unknownTool.includes(k))) {
-                    const allActors2 = [...(G.userAgent ? [G.userAgent] : []), ...G.agents];
-                    const agentParam2 = params.to || params.agent || params.target;
-                    let tgt2 = agentParam2 ? allActors2.find(a => a && (a.id === agentParam2 || a.name === agentParam2)) : null;
-                    if (!tgt2 && agentParam2) tgt2 = allActors2.find(a => a && resolveId(null, 'agent', agentParam2) === a.id);
-                    const msg2 = params.message || params.text || params.content || `（${tool}）`;
-                    if (tgt2) { broadcastEvent(agent, tgt2.id, msg2); return `对${tgt2.icon}${tgt2.name}说："${msg2}"`; }
-                    return `【${agent.name}】${msg2}`;
-                }
-                const moveKeywords = ['go', 'walk', 'run', 'travel', 'enter', 'exit', 'flee', 'escape'];
-                if (moveKeywords.some(k => unknownTool.includes(k))) {
-                    const dest2 = params.destination || params.target || params.to;
-                    if (dest2) return executeTool(agent, 'move', { destination: dest2 });
-                }
-                const attackKeywords = ['hit', 'fight', 'strike', 'slash', 'punch', 'kick', 'stab', 'shoot'];
-                if (attackKeywords.some(k => unknownTool.includes(k))) {
-                    const tgt3 = params.target || params.enemy || params.to;
-                    if (tgt3) return executeTool(agent, 'attack', { target: tgt3 });
-                }
-                return `【${agent.name}】${params.text || params.message || `做了某事（${tool}）`}`;
-            }
-        }
-    }
-
-    // ══════════════════════════════════════════════════════════
-    //  层三：执行引擎层
-    // ══════════════════════════════════════════════════════════
-
-    async function callLLM(systemPrompt, userPrompt) {
-        const s = cfg();
-        addLog(`→ API model=${s.apiModel} promptLen=${userPrompt.length}`, 'debug');
-        if (s.apiUrl && s.apiUrl.trim()) {
-            const resp = await fetch(s.apiUrl.trim(), {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', ...(s.apiKey ? { 'Authorization': `Bearer ${s.apiKey}` } : {}) },
-                body: JSON.stringify({ model: s.apiModel || 'gpt-4o-mini', messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: userPrompt }], temperature: 0.75, max_tokens: 400 })
-            });
-            if (!resp.ok) throw new Error(`API Error ${resp.status}: ${await resp.text()}`);
-            const data = await resp.json();
-            const result = data.choices?.[0]?.message?.content || '';
-            addLog(`← 响应 ${result.length}字`, 'debug');
-            return result;
-        }
-        const { generateRaw } = SillyTavern.getContext();
-        return await generateRaw({ systemPrompt, prompt: userPrompt });
-    }
-
-    async function callLLMWithTimeout(sys, prompt) {
-        const timeoutMs = cfg().llmTimeout || 60000;
-        return new Promise((resolve, reject) => {
-            let settled = false;
-            const timer = setTimeout(() => { if (settled) return; settled = true; const e = new Error(`LLM响应超时（${timeoutMs / 1000}s）`); e.name = 'TimeoutError'; reject(e); }, timeoutMs);
-            callLLM(sys, prompt).then(r => { if (settled) return; settled = true; clearTimeout(timer); resolve(r); }).catch(e => { if (settled) return; settled = true; clearTimeout(timer); reject(e); });
-        });
-    }
-
-    /**
-     * 规则式兜底：对常见中文模式做快速匹配，不依赖 LLM。
-     * 当 LLM 不可用或返回 narrate 时，确保「前往地牢」「攻击战士阿强」等能正确解析。
-     */
-    function ruleBasedParseIntent(userMessage, W) {
-        const msg = String(userMessage || '').trim();
-        if (!msg || !W) return null;
-
-        // 移动：前往/去/到/进入 + 地点名（优先匹配长关键词）
-        const moveKw = ['前往', '去往', '赶往', '走向', '去', '到', '进入'];
-        for (const kw of moveKw) {
-            if (msg === kw) continue;
-            if (msg.startsWith(kw)) {
-                const rest = msg.slice(kw.length).trim();
-                if (!rest) continue;
-                const id = resolveId(W, 'location', rest);
-                if (id) return { tool: 'move', params: { destination: id } };
-            }
-        }
-
-        // 攻击：攻击/打/揍 + 目标
-        const attackKw = ['攻击', '打', '揍', '砍', '劈', '袭击'];
-        for (const kw of attackKw) {
-            if (msg.startsWith(kw)) {
-                let rest = msg.slice(kw.length).replace(/^[了着一下]\s*/, '').trim();
-                if (!rest) continue;
-                const id = resolveId(W, 'enemy', rest) || resolveId(W, 'agent', rest);
-                if (id) return { tool: 'attack', params: { target: id } };
-            }
-        }
-
-        // 拾取：拾取/拿/捡 + 物品名
-        const pickupKw = ['拾取', '拿', '捡', '捡起', '拾起', '拿走'];
-        for (const kw of pickupKw) {
-            if (msg.startsWith(kw)) {
-                const rest = msg.slice(kw.length).trim();
-                if (rest) {
-                    const id = resolveId(W, 'item', rest);
-                    if (id) return { tool: 'pickup_item', params: { target: id } };
-                }
-            }
-        }
-
-        // 使用物品：使用/用/吃/喝 + 物品名
-        const useKw = ['使用', '用', '吃', '喝'];
-        for (const kw of useKw) {
-            if (msg.startsWith(kw)) {
-                const rest = msg.slice(kw.length).replace(/^[了着]\s*/, '').trim();
-                if (rest) {
-                    const id = resolveId(W, 'item', rest);
-                    if (id) return { tool: 'use_item', params: { item: id } };
-                }
-            }
-        }
-
-        // 说话：对X说/和X说/跟X说
-        const speakMatch = msg.match(/^(?:对|和|跟|向)(.+?)(?:说|道|讲)(?:[:：]?\s*)?(.*)$/);
-        if (speakMatch) {
-            const who = speakMatch[1].trim();
-            const content = (speakMatch[2] || '').trim();
-            const id = resolveId(W, 'agent', who);
-            if (id) return { tool: 'speak', params: { to: id, message: content || '（打了个招呼）' } };
-        }
-
-        // 搜索/休息
-        if (/^(搜索|搜|找找|查找|探索)/.test(msg)) return { tool: 'search', params: {} };
-        if (/^(休息|歇|歇一歇|回血|恢复)/.test(msg)) return { tool: 'rest', params: {} };
-
-        return null;
-    }
-
-    /**
-     * 意图理解 Agent（核心层）：
-     * 将用户任意自然语言解析为可执行的游戏指令。
-     * - 先尝试规则式兜底（确保常见模式必中）
-     * - 再通过 LLM 理解复杂意图
-     * - 永远不返回 null：兜底为 narrate
-     */
-    async function parseUserIntent(userMessage) {
-        const u = G.userAgent;
-        const W = G.world;
-        if (!u || !W) return { tool: 'narrate', params: { text: userMessage } };
-
-        // ① 规则式兜底优先：常见「前往X」「攻击X」「对X说」必中
-        const ruleResult = ruleBasedParseIntent(userMessage, W);
-        if (ruleResult) {
-            addLog(`意图理解(规则): "${userMessage}" → ${ruleResult.tool}`, 'debug');
-            return ruleResult;
-        }
-
-        const loc = W.locations[u.location];
-        const allActors = [...(G.userAgent ? [G.userAgent] : []), ...G.agents];
-
-        const locList = Object.entries(W.locations).map(([id, l]) => `${l.name}→"${id}"`).join(', ');
-        const itemList = Object.entries(W.items).map(([id, it]) => `${it.name}→"${id}"`).join(', ');
-        const enemyList = Object.entries(W.enemies).map(([id, en]) => `${en.name}→"${id}"`).join(', ');
-        const actorList = allActors.map(a => `${a.name}→"${a.id}"`).join(', ');
-
-        const actorsHere = allActors.filter(a => a.hp > 0 && a.location === u.location && a.id !== u.id).map(a => `${a.name}(id="${a.id}")`).join('、') || '无';
-        const enemiesHere = (loc?.enemies || []).map(e => `${W.enemies[e]?.name}(id="${e}")`).join('、') || '无';
-        const reachable = loc?.conn?.map(c => `${W.locations[c]?.name}(id="${c}")`).join('、') || '无';
-        const invList = (u.inventory || []).map(i => `${W.items?.[i]?.name}(id="${i}")`).join('、') || '空';
-
-        const sys = `你是游戏意图理解Agent。无论用户说什么，都必须理解其意图并映射到最合适的游戏操作。
-
-【可用工具】
-- move: 移动到某地点。params: {"destination":"地点ID"}
-- attack: 攻击敌人或NPC。params: {"target":"敌人ID或角色ID"}
-- speak: 对某人说话/交流/辱骂/道歉/任何语言互动。params: {"to":"角色ID","message":"说的内容"}
-- narrate: 叙述行为/心理/动作。params: {"text":"内容"}
-- pickup_item: 拾取物品。params: {"target":"物品ID"}
-- use_item: 使用背包物品。params: {"item":"物品ID"}
-- search: 搜索当前地点。params: {}
-- inspect: 查看详情。params: {"target":"ID"}
-- rest: 休息。params: {}
-- complete_turn: 结束本回合。params: {"summary":"总结"}
-
-【重要规则】
-1. params 中的 ID 必须使用下方列出的游戏内 ID，不能填中文名
-2. 任何语言互动（骂人、道歉、聊天、嘲讽、询问等）都用 speak
-3. 无法归类的行为用 narrate 记录
-4. 必须输出 JSON，不能说"无法理解"
-
-【全部合法ID】
-地点: ${locList}
-物品: ${itemList}
-敌人: ${enemyList}
-角色: ${actorList}
-
-只输出JSON，格式：{"tool":"工具名","params":{}}`;
-
-        const prompt = `用户说：「${userMessage}」
-
-当前状态：
-- 位置: ${loc?.name}(id="${u.location}") | HP: ${u.hp}/${u.maxHp} | 背包: ${invList}
-- 同地点角色: ${actorsHere}
-- 同地点敌人: ${enemiesHere}
-- 可前往: ${reachable}
-
-输出JSON：`;
-
-        try {
-            const raw = await callLLMWithTimeout(sys, prompt);
-            addLog(`意图理解原始响应: ${(raw || '').substring(0, 200)}`, 'debug');
-            const m = (raw || '').match(/\{[\s\S]*?\}/);
-            if (m) {
-                const o = JSON.parse(m[0]);
-                if (o.tool) return { tool: o.tool, params: resolveParams(W, o.tool, o.params || {}) };
-            }
-        } catch (e) { addLog(`意图理解失败: ${e.message}`, 'warn'); }
-        return { tool: 'narrate', params: { text: userMessage } };
-    }
-
-    function checkGoal(agent) {
-        const W = G.world;
-        const hallEnemies = W.locations.dungeon_hall?.enemies || [];
-        if (agent.location === 'dungeon_hall' && hallEnemies.length === 0) return { done: true, reason: pt('goalSuccess') || '地牢大厅已清空！' };
-        if (agent.hp <= 0) return { done: true, reason: pt('goalFail') || 'HP为0' };
-        return { done: false, reason: '' };
-    }
-
-    function broadcastEvent(from, toId, msg) {
-        G.msgQueue.push({ from: from.id, fromName: from.name, to: toId, msg, round: G.round });
-    }
-
-    function buildReActPrompt(agent, step, hist) {
-        const W = G.world;
-        const loc = W.locations[agent.location];
-        const others = G.agents.filter(a => a.id !== agent.id);
-        const othStr = [...(G.userAgent ? [`${G.userAgent.icon}${G.userAgent.name}(${G.userAgent.id}) HP:${G.userAgent.hp}/${G.userAgent.maxHp} 位置:${W.locations[G.userAgent.location]?.name || G.userAgent.location}`] : []),
-            ...others.map(o => `${o.icon}${o.name}(${o.id}) HP:${o.hp}/${o.maxHp} 位置:${W.locations[o.location]?.name || o.location}`)].join('\n  ');
-
-        const msgs = G.msgQueue.filter(m => m.to === agent.id && m.round >= G.round - 1);
-        const msgStr = msgs.length > 0 ? msgs.map(m => `${m.fromName}: ${m.msg}`).join('\n  ') : '无';
-
-        const roundHistory = G.actionsHistory.filter(h => h.agentId !== agent.id && h.round >= G.round - 1)
-            .map(h => `[R${h.round}] ${h.agentName}: ${h.tool} → ${(h.observation || '').substring(0, 80)}`).join('\n  ') || '无';
-
-        const toolsDesc = pt('toolsDesc').replace('{{OTHER_AGENT_IDS}}', others.map(o => o.id).join(', '));
-
-        return `【角色人设】${agent.prompt}
-【世界信息】${cfg().worldInfo || '（未加载世界书）'}
-【当前状态】
-  位置: ${loc.name}(${agent.location}) — ${loc.desc}
-  HP: ${agent.hp}/${agent.maxHp} | 金币: ${agent.gold}
-  背包: [${agent.inventory.map(i => W.items[i]?.name || i).join('、') || '空'}]
-  地面物品: [${loc.items.map(i => W.items[i]?.name || i).join('、') || '无'}]
-  敌人: [${loc.enemies.map(e => `${W.enemies[e]?.name}(HP:${W.enemies[e]?.hp})`).join('、') || '无'}]
-  可前往: ${loc.conn.map(c => `${W.locations[c]?.name}(${c})`).join('、')}
-【${pt('teammateLabel')}】
-  ${othStr}
-【${pt('teammateMsgLabel')}】
-  ${msgStr}
-【${pt('roundHistoryLabel')}】
-  ${roundHistory}
-【可用工具】
-${toolsDesc}
-【${pt('observationLabel')}】
-${hist.map(h => `  步${h.step}: ${h.tool}(${JSON.stringify(h.params)}) → ${h.obs.substring(0, 60)}`).join('\n') || '  （首步）'}
-
-步骤 ${step}，请输出：
-${pt('outputFormat')}`;
-    }
-
-    function parseReActOutput(raw) {
-        const thought = (raw.match(/THOUGHT:\s*([\s\S]*?)(?=\nACTION:|$)/i) || [])[1]?.trim() || '';
-        const actionRaw = (raw.match(/ACTION:\s*([\s\S]*)/i) || [])[1]?.trim() || '';
-        let tool = null, params = {}, rawAction = '';
-        const jsonMatch = actionRaw.match(/\{[\s\S]*\}/);
-        if (jsonMatch) {
-            try {
-                const obj = JSON.parse(jsonMatch[0]);
-                tool = obj.tool; params = obj.params || {};
-            } catch (_) {}
-        }
-        if (!tool) rawAction = actionRaw;
-        return { thought, tool, params, rawAction };
-    }
-
-    async function interpretNaturalAction(agent, naturalText) {
-        const W = G.world;
-        const loc = W?.locations?.[agent?.location];
-        const allActors = [...(G.userAgent ? [G.userAgent] : []), ...G.agents];
-        const locList = Object.entries(W.locations).map(([id, l]) => `${l.name}→"${id}"`).join(', ');
-        const itemList = Object.entries(W.items).map(([id, it]) => `${it.name}→"${id}"`).join(', ');
-        const enemyList = Object.entries(W.enemies).map(([id, en]) => `${en.name}→"${id}"`).join(', ');
-        const actorList = allActors.map(a => `${a.name}→"${a.id}"`).join(', ');
-        const actorsHere = allActors.filter(a => a.hp > 0 && a.location === agent.location && a.id !== agent.id).map(a => `${a.name}(id="${a.id}")`).join('、') || '无';
-        const enemiesHere = (loc?.enemies || []).map(e => `${W.enemies[e]?.name}(id="${e}")`).join('、') || '无';
-        const reachable = loc?.conn?.map(c => `${W.locations[c]?.name}(id="${c}")`).join('、') || '无';
-
-        const sys = `你是游戏意图理解Agent。将Agent的自然语言行动解析为游戏指令。
-【可用工具】move/attack/speak/narrate/pickup_item/use_item/search/inspect/rest/complete_turn
-【规则】params中ID必须用下方列出的游戏内ID，任何语言互动用speak，无法归类用narrate，必须输出JSON
-【全部合法ID】地点: ${locList} | 物品: ${itemList} | 敌人: ${enemyList} | 角色: ${actorList}
-只输出JSON：{"tool":"工具名","params":{}}`;
-
-        const prompt = `Agent(${agent.name})说/做：${naturalText}
-当前状态：位置=${loc?.name}(id="${agent.location}") | 同地点角色: ${actorsHere} | 同地点敌人: ${enemiesHere} | 可前往: ${reachable}
-输出JSON：`;
-
-        try {
-            const raw = await callLLMWithTimeout(sys, prompt);
-            const m = (raw || '').match(/\{[\s\S]*?\}/);
-            if (m) { const o = JSON.parse(m[0]); if (o.tool) return { tool: o.tool, params: resolveParams(W, o.tool, o.params || {}) }; }
-        } catch (_) {}
-        return { tool: 'narrate', params: { text: naturalText } };
-    }
-
-    function extractFirstJson(str) {
-        const start = str.indexOf('{');
-        if (start === -1) return null;
-        let depth = 0, inStr = false, escape = false;
-        for (let i = start; i < str.length; i++) {
-            const c = str[i];
-            if (escape) { escape = false; continue; }
-            if (c === '\\' && inStr) { escape = true; continue; }
-            if (c === '"') { inStr = !inStr; continue; }
-            if (inStr) continue;
-            if (c === '{') depth++; else if (c === '}') { depth--; if (depth === 0) return str.slice(start, i + 1); }
-        }
-        return null;
-    }
-
-    function runFallbackDialogue(agent) {
-        addLog(`⚠️ ${agent.name} 连续解析失败，已降级为对话模式`, 'warn');
-        postSystemMsg(`⚠️ ${agent.name} 暂时无法规划行动，进入休整状态`, 'warn');
-        postAgentMsg(agent, '-', '暂时无法规划行动，先休整等待...', 'complete_turn', '降级：跳过本回合', cfg().maxSteps || 5);
-    }
-
-    /**
-     * 当 LLM 返回空响应时，根据 Agent 当前状态生成合理的兜底行为。
-     * 优先级：有未读消息→回应 / 受伤且有药→治疗 / 有敌人→攻击 / 默认→观察环境
-     */
-    function generateFallbackAction(agent) {
-        const W = G.world;
-        const loc = W.locations[agent.location];
-        const msgs = G.msgQueue.filter(m => m.to === agent.id && m.round >= G.round - 1);
-
-        // 有未读消息 → 回应最近一条
-        if (msgs.length > 0) {
-            const last = msgs[msgs.length - 1];
-            return {
-                thought: `${last.fromName}对我说了什么，我需要回应。`,
-                tool: 'speak',
-                params: { to: last.from, message: `……（${agent.name}思考了一会儿，但没能组织好语言）` }
-            };
-        }
-
-        // 受伤且背包有治疗物品 → 使用
-        if (agent.hp < agent.maxHp * 0.7) {
-            const healItem = (agent.inventory || []).find(i => W.items[i]?.effect === 'heal');
-            if (healItem) {
-                return {
-                    thought: '我受伤了，应该先治疗一下。',
-                    tool: 'use_item',
-                    params: { item: healItem }
-                };
-            }
-        }
-
-        // 当前位置有敌人 → 攻击
-        if (loc.enemies.length > 0) {
-            return {
-                thought: `这里有敌人，我必须应战！`,
-                tool: 'attack',
-                params: { target: loc.enemies[0] }
-            };
-        }
-
-        // 默认 → 观察环境
-        return {
-            thought: `${agent.name}环顾四周，观察当前局势。`,
-            tool: 'narrate',
-            params: { text: `${agent.name}环顾四周，保持警惕。` }
-        };
-    }
-
-    async function runTurn(agent) {
-        const maxSteps = cfg().maxSteps || 5;
-        const hist = [];
-        let failStreak = 0;
-
-        for (let step = 1; step <= maxSteps; step++) {
-            if (G.paused) await waitResume();
-            if (G.stopReq || !G.running) break;
-
-            const goal = checkGoal(agent);
-            if (goal.done) { postSystemMsg(`✅ ${agent.name}：${goal.reason}`); break; }
-
-            const thinkId = `mac-thinking-${Date.now()}`;
-            postThinkingMsg(agent, step, maxSteps, thinkId);
-
-            let parsed = null;
-            try {
-                const prompt = buildReActPrompt(agent, step, hist);
-                const raw = await callLLMWithTimeout(pt('systemPrompt'), prompt);
-                addLog(`${agent.name} 步${step} 原始: ${raw.substring(0, 120)}`, 'debug');
-                parsed = parseReActOutput(raw);
-            } catch (e) {
-                removeThinkingMsg(thinkId);
-                if (e.name === 'TimeoutError') { postSystemMsg(`⏱️ ${agent.name} 步骤${step}超时，跳过`, 'warn'); break; }
-                postSystemMsg(`⚠️ LLM调用失败: ${e.message}`, 'error');
-                failStreak++;
-                if (failStreak >= 3) { runFallbackDialogue(agent); break; }
-                continue;
-            }
-
-            if (!parsed || (!parsed.tool && !parsed.rawAction && !parsed.thought)) {
-                removeThinkingMsg(thinkId);
-                failStreak++;
-                if (failStreak >= 3) { runFallbackDialogue(agent); break; }
-                // 空响应不再静默跳过：根据当前状态自动做合理的兜底行为
-                const fallback = generateFallbackAction(agent);
-                const fbObs = executeTool(agent, fallback.tool, fallback.params);
-                hist.push({ step, tool: fallback.tool, params: fallback.params, obs: fbObs });
-                G.actionsHistory.push({ round: G.round, agentId: agent.id, agentName: agent.name, tool: fallback.tool, observation: fbObs });
-                G.actionsHistory = G.actionsHistory.filter(h => h.round >= G.round - 2);
-                postAgentMsg(agent, step, fallback.thought, fallback.tool, fbObs, maxSteps);
-                updateHUD();
-                addLog(`${agent.name} 步${step} 空响应，兜底: ${fallback.tool}`, 'warn');
-                if (agent.hp <= 0) { postSystemMsg(`💀 ${agent.name}倒下`, 'error'); break; }
-                await sleep(cfg().stepDelay || 1000);
-                continue;
-            }
-
-            failStreak = 0;
-            let tool = parsed.tool, params = parsed.params;
-            if (!tool && parsed.rawAction) {
-                const interpreted = await interpretNaturalAction(agent, parsed.rawAction);
-                tool = interpreted.tool; params = interpreted.params;
-            }
-            if (!tool && parsed.thought && !parsed.rawAction) {
-                // 只有 THOUGHT 没有 ACTION 时，把想法转为叙述
-                tool = 'narrate'; params = { text: parsed.thought };
-            }
-
-            const observation = executeTool(agent, tool || 'rest', params || {});
-            hist.push({ step, tool: tool || 'rest', params: params || {}, obs: observation });
-            G.actionsHistory.push({ round: G.round, agentId: agent.id, agentName: agent.name, tool: tool || 'rest', observation });
-            const maxHistoryRounds = 2;
-            G.actionsHistory = G.actionsHistory.filter(h => h.round >= G.round - maxHistoryRounds);
-
-            removeThinkingMsg(thinkId);
-            postAgentMsg(agent, step, parsed.thought, tool || 'rest', observation, maxSteps);
-            updateHUD();
-
-            if (tool === 'complete_turn') break;
-            if (agent.hp <= 0) { postSystemMsg(`💀 ${agent.name}倒下`, 'error'); break; }
-
-            await sleep(cfg().stepDelay || 1000);
-        }
-    }
-
-    // ══════════════════════════════════════════════════════════
-    //  层四：Agent协调层
-    // ══════════════════════════════════════════════════════════
-
-    function runEnvironmentTurn() {
-        const W = G.world;
-        const events = [];
-        const allActors = [...(G.userAgent ? [G.userAgent] : []), ...G.agents];
-        allActors.forEach(a => {
-            if (!a || a.hp <= 0) return;
-            if (a.location === 'village' && a.hp < a.maxHp) {
-                const heal = 15; a.hp = Math.min(a.maxHp, a.hp + heal);
-                events.push(`🏠 ${a.name} 在村庄休整，恢复 ${heal}HP（当前: ${a.hp}/${a.maxHp}）`);
-            }
-        });
-        allActors.forEach(a => {
-            if (!a || a.hp <= 0) return;
-            const loc = W.locations[a.location];
-            if (loc.enemies.length > 0 && a.location !== 'village') {
-                a.hp = Math.max(0, a.hp - 5);
-                events.push(`⚡ ${a.name} 在【${loc.name}】受到环境威胁，损失 5HP（当前: ${a.hp}/${a.maxHp}）`);
-            }
-        });
-        Object.entries(ENEMY_HOME).forEach(([enemyId, locId]) => {
-            const loc = W.locations[locId];
-            if (!loc.enemies.includes(enemyId) && Math.random() < 0.3) {
-                loc.enemies.push(enemyId); W.enemies[enemyId].hp = W.enemies[enemyId].maxHp;
-                events.push(`👹 【${W.locations[locId].name}】重新出现了 ${W.enemies[enemyId].name}！`);
-            }
-        });
-        const narrations = (pt('envNarrations') || '').split('\n').filter(Boolean);
-        if (narrations.length > 0 && Math.random() < 0.4) events.push(narrations[Math.floor(Math.random() * narrations.length)]);
-        postSystemMsg(`🌍 ── ${pt('envTurnLabel')} ──`, 'env');
-        if (events.length > 0) events.forEach(e => postSystemMsg(e, 'env'));
-        else postSystemMsg(pt('envCalm') || '风平浪静，无明显变化。', 'env');
-        updateHUD();
-    }
-
-    async function gameLoop() {
-        const s = cfg();
-        postSystemMsg(`🚀 ═══ 多智能体协作游戏开始 ═══`);
-        postSystemMsg(`🎮 你是主角！${G.userAgent?.icon || '👤'}${G.userAgent?.name || '玩家'} | NPC: ${G.agents.map(a => `${a.icon}${a.name}`).join('、')}`);
-        postSystemMsg(`每轮：你先行动（自然语言）→ NPC 思考响应 → 环境变化`);
-        const sorted = [...G.agents].sort((a, b) => a.priority - b.priority);
-
-        while (G.running && G.round < s.maxRounds) {
-            G.round++;
-            postSystemMsg(`\n══ 第 ${G.round} / ${s.maxRounds} 轮 ══`);
-            updateHUD();
-
-            if (G.paused) await waitResume();
-            if (G.stopReq || !G.running) break;
-            const userInput = await waitForUserAction();
-            if (G.stopReq || !G.running) break;
-
-            const parsed = await parseUserIntent(userInput);
-            const toolToUse = parsed.tool;
-            const paramsToUse = parsed.params;
-            addLog(`意图理解: "${userInput}" → tool=${toolToUse} params=${JSON.stringify(paramsToUse)}`, 'debug');
-
-            const userResult = G.userAgent ? executeTool(G.userAgent, toolToUse, paramsToUse) : '';
-            if (G.userAgent) {
-                G.actionsHistory.push({ round: G.round, agentId: G.userAgent.id, agentName: G.userAgent.name, tool: toolToUse, observation: userResult });
-                G.actionsHistory = G.actionsHistory.filter(h => h.round >= G.round - 2);
-            }
-            postUserMsg(G.userAgent, userInput, toolToUse, userResult);
-            addLog(`玩家: "${userInput}" → ${toolToUse} → ${userResult.substring(0, 80)}`);
-            updateHUD();
-
-            if (G.userAgent?.hp <= 0) { postSystemMsg(`💀 玩家倒下，游戏结束`, 'error'); break; }
-
-            for (let i = 0; i < sorted.length; i++) {
-                if (G.stopReq || !G.running) break;
-                if (G.paused) await waitResume();
-                G.curIdx = G.agents.indexOf(sorted[i]);
-                updateHUD();
-                const agent = sorted[i];
-                if (agent.hp <= 0) { postSystemMsg(`💀 ${agent.name}已倒下，跳过`, 'warn'); continue; }
-                await runTurn(agent);
-                updateHUD();
-            }
-
-            runEnvironmentTurn();
-
-            const hallEnemies = G.world.locations.dungeon_hall?.enemies || [];
-            if (hallEnemies.length === 0 && G.round > 0) {
-                postSystemMsg(`🏆 ═══ 胜利！${pt('goalSuccess')} ═══`);
-                addLog('胜利！', 'info'); break;
-            }
-            const allDead = G.agents.every(a => a.hp <= 0) && (!G.userAgent || G.userAgent.hp <= 0);
-            if (allDead) { postSystemMsg(`💀 游戏结束`, 'error'); break; }
-        }
-
-        if (G.round >= s.maxRounds) postSystemMsg(`🎬 游戏结束，共 ${G.round} 轮`);
-        G.running = false; updateHUD();
-    }
-
-    function doStart() {
-        if (!G.inited) { addLog('请先初始化', 'warn'); return; }
-        if (G.running) { addLog('已在运行', 'warn'); return; }
-        if (G.userAgent) {
-            const s = cfg();
-            G.userAgent.name = s.userName || G.userAgent.name;
-            G.userAgent.icon = s.userIcon || G.userAgent.icon;
-        }
-        G.running = true; G.stopReq = false; G.paused = false;
-        updateHUD(); gameLoop();
-    }
-
-    function doPause() {
-        G.paused = !G.paused; updateHUD();
-        postSystemMsg(G.paused ? '⏸ 游戏已暂停' : '▶ 游戏继续');
-    }
-
-    function doStop() {
-        G.stopReq = true; G.running = false;
-        G.waitingForUser = false;
-        const bar = document.getElementById('mac-chat-input-bar');
-        if (bar) bar.style.display = 'none';
-        const section = document.getElementById('mac-hud-user-action');
-        if (section) section.style.display = 'none';
-        if (G.userActionResolve) { G.userActionResolve('休息'); G.userActionResolve = null; }
-        updateHUD();
-        postSystemMsg('⏹ 游戏已停止');
-        addLog('游戏已停止', 'info');
-    }
-
-    // ══════════════════════════════════════════════════════════
-    //  层五：前端交互层
-    // ══════════════════════════════════════════════════════════
-
-    const toolLabels = { move: '移动', search: '搜索', pickup_item: '拾取', attack: '攻击', interact: '交流', inspect: '查看', use_item: '使用', rest: '休息', complete_turn: '结束', speak: '说话', narrate: '叙述' };
-    const toolColors = { move: '#3b82f6', search: '#a78bfa', pickup_item: '#34d399', attack: '#f87171', interact: '#fbbf24', inspect: '#60a5fa', use_item: '#2dd4bf', rest: '#818cf8', complete_turn: '#6b7280', speak: '#fbbf24', narrate: '#94a3b8' };
-
-    function postUserMsg(userAgent, text, tool, result) {
-        const chat = getChatEl(); if (!chat) return;
-        const label = toolLabels[tool] || tool;
-        const color = toolColors[tool] || '#6b7280';
-        const div = document.createElement('div');
-        div.className = 'mac-user-bubble';
-        div.innerHTML = `<div class="mac-bubble-head mac-user-head">
-          <span class="mac-bubble-icon">${userAgent?.icon || '👤'}</span>
-          <span class="mac-bubble-name">${userAgent?.name || '玩家'}</span>
-          <span class="mac-bubble-role">主角</span>
-          <span class="mac-bubble-round">R${G.round}</span>
-        </div>
-        <div class="mac-bubble-action">
-          <span class="mac-action-tag" style="color:${color};border-color:${color}">${label}</span>
-          <span class="mac-action-result">${escHtml(result)}</span>
-        </div>
-        <div class="mac-user-raw">💬 "${escHtml(text)}"</div>`;
-        chat.appendChild(div);
-        chat.scrollTop = chat.scrollHeight;
-    }
-
-    function postAgentMsg(agent, step, thought, tool, result, totalSteps) {
-        const chat = getChatEl(); if (!chat) return;
-        const label = toolLabels[tool] || tool;
-        const color = toolColors[tool] || '#6b7280';
-        const div = document.createElement('div');
-        div.className = 'mac-agent-bubble';
-        div.innerHTML = `<div class="mac-bubble-head">
-          <span class="mac-bubble-icon">${agent.icon}</span>
-          <span class="mac-bubble-name">${agent.name}</span>
-          <span class="mac-bubble-role">${agent.role}</span>
-          <span class="mac-bubble-step">步${step}/${totalSteps}</span>
-          <span class="mac-bubble-round">R${G.round}</span>
-        </div>
-        ${thought ? `<div class="mac-bubble-thought">💭 ${escHtml(thought)}</div>` : ''}
-        <div class="mac-bubble-action">
-          <span class="mac-action-tag" style="color:${color};border-color:${color}">${label}</span>
-          <span class="mac-action-result">${escHtml(result)}</span>
-        </div>`;
-        chat.appendChild(div);
-        chat.scrollTop = chat.scrollHeight;
-    }
-
-    function postSystemMsg(text, type = 'system') {
-        const chat = getChatEl(); if (!chat) return;
-        const div = document.createElement('div');
-        div.className = `mac-system-msg mac-sys-${type}`;
-        div.textContent = text;
-        chat.appendChild(div);
-        chat.scrollTop = chat.scrollHeight;
-    }
-
-    function postThinkingMsg(agent, step, maxSteps, id) {
-        const chat = getChatEl(); if (!chat) return;
-        const div = document.createElement('div');
-        div.id = id; div.className = 'mac-thinking-msg';
-        div.innerHTML = `${agent.icon}${agent.name} 思考中（步${step}/${maxSteps}）<span class="mac-dots">...</span>`;
-        chat.appendChild(div);
-        chat.scrollTop = chat.scrollHeight;
-    }
-
-    function removeThinkingMsg(id) {
-        const el = document.getElementById(id);
-        if (el) el.remove();
-    }
-
-    // ── HUD ──────────────────────────────────────────────────
-
-    function createHUD() {
-        if (document.getElementById('mac-hud')) return;
-        const hud = document.createElement('div');
-        hud.id = 'mac-hud';
-        hud.innerHTML = `
-<div id="mac-hud-drag">
-  <span id="mac-hud-title">🤖 多智能体</span>
-  <span id="mac-hud-round">第0轮</span>
-  <button id="mac-hud-toggle" title="收起/展开">−</button>
-</div>
-<div id="mac-hud-body">
-  <div id="mac-hud-agents"></div>
-  <div id="mac-hud-user-action" class="mac-hud-user-section" style="display:none">
-    <div class="mac-chat-input-wrap">
-      <input id="mac-hud-user-input" type="text" class="mac-chat-input" placeholder="输入你的行动（自然语言）">
-      <button id="mac-hud-user-submit" class="mac-chat-send" title="发送">➤</button>
-    </div>
-  </div>
-  <div id="mac-hud-status">未初始化</div>
-  <div id="mac-hud-btns">
-    <button class="mac-hud-btn" id="mac-hud-init" title="初始化">🔄</button>
-    <button class="mac-hud-btn mac-hud-start" id="mac-hud-start" disabled title="开始">▶</button>
-    <button class="mac-hud-btn mac-hud-pause" id="mac-hud-pause" disabled title="暂停">⏸</button>
-    <button class="mac-hud-btn mac-hud-stop" id="mac-hud-stop" disabled title="停止">⏹</button>
-  </div>
-</div>`;
-        document.body.appendChild(hud);
-        makeDraggable(hud, document.getElementById('mac-hud-drag'));
-        document.getElementById('mac-hud-toggle').addEventListener('click', () => {
-            const body = document.getElementById('mac-hud-body');
-            const btn = document.getElementById('mac-hud-toggle');
-            const hidden = body.style.display === 'none';
-            body.style.display = hidden ? '' : 'none';
-            btn.textContent = hidden ? '−' : '+';
-        });
-        document.getElementById('mac-hud-init').addEventListener('click', doInit);
-        document.getElementById('mac-hud-start').addEventListener('click', doStart);
-        document.getElementById('mac-hud-pause').addEventListener('click', doPause);
-        document.getElementById('mac-hud-stop').addEventListener('click', doStop);
-        document.getElementById('mac-hud-user-submit').addEventListener('click', submitUserAction);
-        document.getElementById('mac-hud-user-input').addEventListener('keydown', e => { if (e.key === 'Enter') submitUserAction(); });
-        updateHUD();
-    }
-
-    function makeDraggable(el, handle) {
-        let drag = false, ox = 0, oy = 0;
-        handle.style.cursor = 'grab';
-        handle.addEventListener('mousedown', e => { if (e.target.tagName === 'BUTTON') return; drag = true; ox = e.clientX - el.offsetLeft; oy = e.clientY - el.offsetTop; handle.style.cursor = 'grabbing'; e.preventDefault(); });
-        document.addEventListener('mousemove', e => { if (!drag) return; el.style.left = Math.max(0, Math.min(window.innerWidth - el.offsetWidth, e.clientX - ox)) + 'px'; el.style.top = Math.max(0, Math.min(window.innerHeight - el.offsetHeight, e.clientY - oy)) + 'px'; el.style.right = 'auto'; el.style.bottom = 'auto'; });
-        document.addEventListener('mouseup', () => { drag = false; handle.style.cursor = 'grab'; });
-    }
-
-    function waitForUserAction() {
-        return new Promise(resolve => {
-            G.waitingForUser = true; G.userActionResolve = resolve;
-            const section = document.getElementById('mac-hud-user-action');
-            const body = document.getElementById('mac-hud-body');
-            if (body && body.style.display === 'none') { body.style.display = ''; document.getElementById('mac-hud-toggle').textContent = '−'; }
-            if (section) section.style.display = '';
-            ensureChatInputInChat();
-            const input = document.getElementById('mac-hud-user-input') || document.getElementById('mac-chat-user-input');
-            if (input) { input.value = ''; input.focus(); }
-            updateHUD();
-        });
-    }
-
-    function ensureChatInputInChat() {
-        let bar = document.getElementById('mac-chat-input-bar');
-        const chat = getChatEl();
-        if (!bar && chat) {
-            bar = document.createElement('div');
-            bar.id = 'mac-chat-input-bar'; bar.className = 'mac-chat-input-bar';
-            bar.innerHTML = `<div class="mac-chat-input-wrap"><input id="mac-chat-user-input" type="text" class="mac-chat-input" placeholder="输入你的行动（自然语言）"><button id="mac-chat-send-btn" class="mac-chat-send" title="发送">➤</button></div>`;
-            chat.parentElement?.appendChild(bar);
-            bar.querySelector('#mac-chat-send-btn').addEventListener('click', submitUserAction);
-            bar.querySelector('#mac-chat-user-input').addEventListener('keydown', e => { if (e.key === 'Enter') submitUserAction(); });
-        }
-        if (bar) bar.style.display = G.waitingForUser ? '' : 'none';
-    }
-
-    function submitUserAction() {
-        if (!G.waitingForUser || !G.userActionResolve) return;
-        const input = document.getElementById('mac-hud-user-input') || document.getElementById('mac-chat-user-input');
-        const text = (input?.value || '').trim();
-        const section = document.getElementById('mac-hud-user-action');
-        const bar = document.getElementById('mac-chat-input-bar');
-        if (section) section.style.display = 'none';
-        if (bar) bar.style.display = 'none';
-        G.waitingForUser = false;
-        const resolve = G.userActionResolve;
-        G.userActionResolve = null;
-        resolve(text || '休息');
-    }
-
-    function updateHUD() {
-        const roundEl = document.getElementById('mac-hud-round');
-        if (roundEl) roundEl.textContent = `第${G.round}轮`;
-        const agentsEl = document.getElementById('mac-hud-agents');
-        if (agentsEl) {
-            const all = [...(G.userAgent ? [G.userAgent] : []), ...G.agents];
-            agentsEl.innerHTML = all.map((a, i) => {
-                const isUser = a.id === 'user';
-                const hpPct = a.maxHp > 0 ? Math.round(a.hp / a.maxHp * 100) : 0;
-                const loc = G.world?.locations?.[a.location]?.name || a.location || '?';
-                return `<div class="hud-agent${isUser ? ' hud-user' : ''}${!isUser && G.running && i - 1 === G.curIdx ? ' hud-active' : ''}">
-                    <span class="hud-icon">${a.icon}</span>
-                    <span class="hud-name">${a.name}</span>
-                    <span class="hud-hp">${a.hp}/${a.maxHp}</span>
-                    <div class="hud-bar"><div class="hud-bar-fill" style="width:${hpPct}%;background:${hpPct > 50 ? '#34d399' : hpPct > 25 ? '#fbbf24' : '#f87171'}"></div></div>
-                    <span class="hud-loc">${loc}</span>
-                </div>`;
-            }).join('');
-        }
-        const statusEl = document.getElementById('mac-hud-status');
-        if (statusEl) {
-            statusEl.textContent = !G.inited ? '未初始化' : !G.running ? '已停止' : G.waitingForUser ? '等待你的行动…' : G.paused ? '已暂停' : `运行中 R${G.round}`;
-        }
-        const runLabel = document.getElementById('mac-ext-runlabel');
-        if (runLabel) runLabel.textContent = !G.inited ? '未运行' : !G.running ? '已停止' : G.paused ? '已暂停' : `运行中 R${G.round}`;
-
-        ['mac-ext-start', 'mac-hud-start'].forEach(id => { const el = document.getElementById(id); if (el) el.disabled = !G.inited || G.running; });
-        ['mac-ext-pause', 'mac-hud-pause'].forEach(id => { const el = document.getElementById(id); if (el) el.disabled = !G.running; });
-        ['mac-ext-stop', 'mac-hud-stop'].forEach(id => { const el = document.getElementById(id); if (el) el.disabled = !G.running; });
-    }
-
-    // ── Settings Panel ──────────────────────────────────────
-
-    function getExtensionsSettingsMount() {
-        return document.getElementById('extensions_settings') || document.getElementById('extensions2') || document.querySelector('[data-extensions-settings]');
-    }
-
-    function renderAgentList() {
-        const el = document.getElementById('mac-agents-list'); if (!el) return;
-        const s = cfg();
-        el.innerHTML = s.agents.map((a, i) => `<div class="mac-agent-cfg">
-  <div class="mac-agentcfg-head">
-    <input class="mac-input mac-input-tiny mac-agent-icon" value="${escAttr(a.icon)}" data-idx="${i}">
-    <input class="mac-input mac-agent-name" value="${escAttr(a.name)}" placeholder="名称" data-idx="${i}">
-    <input class="mac-input mac-agent-role" value="${escAttr(a.role)}" placeholder="角色" data-idx="${i}" style="width:80px">
-    <button class="mac-btn-icon mac-agent-del" data-idx="${i}" title="删除">🗑️</button>
-  </div>
-  <textarea class="mac-textarea mac-agent-prompt" rows="3" data-idx="${i}" placeholder="角色提示词…">${escHtml(a.prompt)}</textarea>
-</div>`).join('');
-        el.querySelectorAll('.mac-agent-del').forEach(btn => {
-            btn.addEventListener('click', () => {
-                const idx = parseInt(btn.dataset.idx);
-                if (s.agents.length <= 1) { alert('至少保留一个角色！'); return; }
-                if (confirm(`确定删除角色"${s.agents[idx].name}"？`)) { s.agents.splice(idx, 1); saveCfg(); renderAgentList(); }
-            });
-        });
-    }
-
-    function createSettingsPanel() {
-        if (document.getElementById('mac-ext-wrap')) return;
-        const s = cfg();
-
-        const saveSlotsHtml = [1, 2, 3].map(slot => `<div class="mac-save-slot"><span class="mac-save-label">槽位${slot}</span><span id="mac-save-info-${slot}" class="mac-save-info">${getSaveInfo(slot)}</span><button class="mac-btn mac-btn-sm mac-btn-sec" id="mac-save-btn-${slot}">💾 存</button><button class="mac-btn mac-btn-sm mac-btn-sec" id="mac-load-btn-${slot}">📂 取</button></div>`).join('');
-
-        const html = `
-<div id="mac-ext-wrap" class="inline-drawer">
-  <div class="inline-drawer-toggle inline-drawer-header" id="mac-ext-header">
-    <b>🤖 多智能体协作系统</b>
-    <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
-  </div>
-  <div class="inline-drawer-content" id="mac-ext-content">
-    <div class="mac-ext-statusbar">
-      <span id="mac-ext-runlabel" class="mac-ext-runlabel">未运行</span>
-      <button id="mac-ext-hud-toggle" class="mac-ext-link-btn">显示/隐藏HUD</button>
-    </div>
-
-    <div class="mac-ext-section">
-      <div class="mac-ext-sec-hd" data-target="mac-sec-api">🔌 API 设置 <span class="mac-sec-arrow">▶</span></div>
-      <div id="mac-sec-api" class="mac-ext-sec-body" style="display:none">
-        <div class="mac-form-row"><label>API地址 <span class="mac-hint">（留空=使用酒馆当前API）</span></label><input id="mac-cfg-apiurl" type="text" class="mac-input" placeholder="https://api.openai.com/v1/chat/completions" value="${escAttr(s.apiUrl)}"></div>
-        <div class="mac-form-row"><label>API Key</label><input id="mac-cfg-apikey" type="password" class="mac-input" placeholder="sk-..." value="${escAttr(s.apiKey)}"></div>
-        <div class="mac-form-row"><label>模型名称</label><input id="mac-cfg-model" type="text" class="mac-input" placeholder="gpt-4o-mini" value="${escAttr(s.apiModel)}"></div>
-        <div class="mac-form-row mac-form-inline" style="flex-wrap:wrap;gap:8px">
-          <button id="mac-cfg-api-save" class="mac-btn mac-btn-sm">💾 保存</button>
-          <button id="mac-cfg-api-test" class="mac-btn mac-btn-sm mac-btn-sec">🔗 测试链接</button>
-        </div>
-        <div id="mac-api-result" class="mac-api-result" style="display:none"></div>
-      </div>
-    </div>
-
-    <div class="mac-ext-section">
-      <div class="mac-ext-sec-hd" data-target="mac-sec-agents">⚔️ 角色配置 <span class="mac-sec-arrow">▶</span></div>
-      <div id="mac-sec-agents" class="mac-ext-sec-body" style="display:none">
-        <div style="display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap">
-          <button id="mac-agent-add" class="mac-btn mac-btn-sm">➕ 添加角色</button>
-          <button id="mac-cfg-agents-save" class="mac-btn mac-btn-sm">💾 保存</button>
-        </div>
-        <div id="mac-agents-list"></div>
-      </div>
-    </div>
-
-    <div class="mac-ext-section">
-      <div class="mac-ext-sec-hd" data-target="mac-sec-worldinfo">📚 World Info <span class="mac-sec-arrow">▶</span></div>
-      <div id="mac-sec-worldinfo" class="mac-ext-sec-body" style="display:none">
-        <div style="display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap">
-          <button id="mac-wi-refresh" class="mac-btn mac-btn-sm mac-btn-sec">🔄 刷新列表</button>
-          <button id="mac-wi-enable" class="mac-btn mac-btn-sm">✓ 启用选中</button>
-          <button id="mac-wi-clear" class="mac-btn mac-btn-sm mac-btn-sec">🗑️ 清除</button>
-        </div>
-        <div id="mac-wi-list" class="mac-wi-list"></div>
-        <div id="mac-wi-display" class="mac-worldinfo-box" style="margin-top:8px">暂无启用的 World Info 内容。</div>
-      </div>
-    </div>
-
-    <div class="mac-ext-section">
-      <div class="mac-ext-sec-hd" data-target="mac-sec-user">👤 玩家设置 <span class="mac-sec-arrow">▶</span></div>
-      <div id="mac-sec-user" class="mac-ext-sec-body" style="display:none">
-        <div class="mac-form-row mac-form-inline"><label>玩家名</label><input id="mac-cfg-username" type="text" class="mac-input" value="${escAttr(s.userName || '玩家')}" style="width:120px"></div>
-        <div class="mac-form-row mac-form-inline"><label>头像</label><input id="mac-cfg-usericon" type="text" class="mac-input mac-input-tiny" value="${escAttr(s.userIcon || '👤')}"></div>
-      </div>
-    </div>
-
-    <div class="mac-ext-section">
-      <div class="mac-ext-sec-hd" data-target="mac-sec-game">⚙️ 游戏参数 <span class="mac-sec-arrow">▶</span></div>
-      <div id="mac-sec-game" class="mac-ext-sec-body" style="display:none">
-        <div class="mac-form-row mac-form-inline"><label>最大轮数</label><input id="mac-cfg-rounds" type="number" class="mac-input mac-input-num" value="${s.maxRounds}" min="1" max="50"></div>
-        <div class="mac-form-row mac-form-inline"><label>步骤延迟 (ms)</label><input id="mac-cfg-delay" type="number" class="mac-input mac-input-num" value="${s.stepDelay}" min="200" max="10000" step="200"></div>
-        <div class="mac-form-row mac-form-inline"><label>每Agent最多步数</label><input id="mac-cfg-maxsteps" type="number" class="mac-input mac-input-num" value="${s.maxSteps || 5}" min="1" max="10"></div>
-        <div class="mac-form-row mac-form-inline"><label>LLM超时 (ms)</label><input id="mac-cfg-timeout" type="number" class="mac-input mac-input-num" value="${s.llmTimeout || 60000}" min="5000" max="300000" step="5000"></div>
-      </div>
-    </div>
-
-    <div class="mac-ext-section">
-      <div class="mac-ext-sec-hd" data-target="mac-sec-prompts">📝 Prompt / 世界模板 <span class="mac-sec-arrow">▶</span></div>
-      <div id="mac-sec-prompts" class="mac-ext-sec-body" style="display:none">
-        <div class="mac-form-row"><label>系统提示词 (systemPrompt)</label><textarea id="mac-cfg-systemprompt" class="mac-textarea mac-prompt-ta" rows="3">${escHtml(pt('systemPrompt'))}</textarea></div>
-        <div class="mac-form-row"><label>世界模板 JSON (worldTpl) <span class="mac-hint">保持JSON格式</span></label><textarea id="mac-cfg-worldtpl" class="mac-textarea mac-prompt-ta" rows="6">${escHtml(pt('worldTpl'))}</textarea></div>
-        <div class="mac-form-row"><label>工具描述 (toolsDesc)</label><textarea id="mac-cfg-toolsdesc" class="mac-textarea mac-prompt-ta" rows="5">${escHtml(pt('toolsDesc'))}</textarea></div>
-        <div class="mac-form-row"><label>输出格式 (outputFormat)</label><textarea id="mac-cfg-outputformat" class="mac-textarea mac-prompt-ta" rows="2">${escHtml(pt('outputFormat'))}</textarea></div>
-        <div class="mac-form-row mac-form-inline"><label>路线A</label><input id="mac-cfg-initroutea" type="text" class="mac-input" value="${escAttr(pt('initRouteA'))}"></div>
-        <div class="mac-form-row mac-form-inline"><label>路线B</label><input id="mac-cfg-initrouteb" type="text" class="mac-input" value="${escAttr(pt('initRouteB'))}"></div>
-        <div class="mac-form-row mac-form-inline"><label>目标</label><input id="mac-cfg-initgoal" type="text" class="mac-input" value="${escAttr(pt('initGoal'))}"></div>
-        <div class="mac-form-row"><label>环境叙述 (每行一条)</label><textarea id="mac-cfg-envnarrations" class="mac-textarea mac-prompt-ta" rows="4">${escHtml(pt('envNarrations'))}</textarea></div>
-        <div class="mac-form-row mac-form-inline"><label>胜利文案</label><input id="mac-cfg-goalsuccess" type="text" class="mac-input" value="${escAttr(pt('goalSuccess'))}"></div>
-        <div class="mac-form-row mac-form-inline"><label>失败文案</label><input id="mac-cfg-goalfail" type="text" class="mac-input" value="${escAttr(pt('goalFail'))}"></div>
-        <div style="display:flex;gap:6px;margin-top:10px;flex-wrap:wrap">
-          <button id="mac-cfg-prompts-save" class="mac-btn mac-btn-sm mac-btn-pri">💾 保存模板</button>
-          <button id="mac-cfg-prompts-reset" class="mac-btn mac-btn-sm mac-btn-warn">🔄 恢复默认</button>
-        </div>
-      </div>
-    </div>
-
-    <div class="mac-ext-section">
-      <div class="mac-ext-sec-hd" data-target="mac-sec-save">💾 存档管理 <span class="mac-sec-arrow">▶</span></div>
-      <div id="mac-sec-save" class="mac-ext-sec-body" style="display:none">${saveSlotsHtml}</div>
-    </div>
-
-    <div class="mac-ext-section">
-      <div class="mac-ext-sec-hd" data-target="mac-sec-log">📋 运行日志 <span class="mac-sec-arrow">▶</span></div>
-      <div id="mac-sec-log" class="mac-ext-sec-body" style="display:none">
-        <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px"><span class="mac-hint">最近100条</span><button id="mac-log-clear" class="mac-btn mac-btn-sm mac-btn-sec" style="margin-left:auto">🗑️ 清空</button></div>
-        <div id="mac-log-box" class="mac-log-box"></div>
-      </div>
-    </div>
-
-    <div class="mac-ext-ctrl">
-      <button id="mac-ext-init" class="mac-btn mac-btn-sec">🔄 初始化游戏</button>
-      <button id="mac-ext-start" class="mac-btn mac-btn-pri" disabled>▶ 开始运行</button>
-      <button id="mac-ext-pause" class="mac-btn mac-btn-warn" disabled>⏸ 暂停</button>
-      <button id="mac-ext-stop" class="mac-btn mac-btn-dng" disabled>⏹ 停止</button>
-    </div>
-  </div>
-</div>`;
-
-        const target = getExtensionsSettingsMount();
-        if (target) target.insertAdjacentHTML('beforeend', html);
-        else document.body.insertAdjacentHTML('beforeend', `<div id="mac-ext-fallback-root" style="position:fixed;top:64px;right:12px;z-index:99999;background:#1a1a2e;border:1px solid rgba(59,130,246,0.4);border-radius:8px;padding:0;max-width:min(420px,92vw);max-height:85vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,0.5)">${html}</div>`);
-
-        bindSettingsEvents();
-        renderAgentList();
-        renderWorldInfoList();
-    }
-
-    async function renderWorldInfoList() {
-        const listEl = document.getElementById('mac-wi-list'); if (!listEl) return;
-        listEl.innerHTML = '<span class="mac-hint">正在加载…</span>';
-        const names = await getSTWorldInfoNames();
-        if (!names.length) { listEl.innerHTML = '<span class="mac-hint">未找到 World Info 文件。</span>'; return; }
-        const selected = cfg().worldInfoSelected || [];
-        listEl.innerHTML = names.map(name => {
-            const checked = selected.includes(name) ? ' checked' : '';
-            return `<label class="mac-wi-item"><input type="checkbox" class="mac-wi-check" value="${escAttr(name)}"${checked}> ${escHtml(name)}</label>`;
-        }).join('');
-    }
-
-    function bindSettingsEvents() {
-        document.querySelectorAll('.mac-ext-sec-hd').forEach(hd => {
-            hd.addEventListener('click', () => {
-                const t = document.getElementById(hd.dataset.target);
-                const arrow = hd.querySelector('.mac-sec-arrow');
-                if (!t) return;
-                const open = t.style.display !== 'none';
-                t.style.display = open ? 'none' : 'block';
-                if (arrow) arrow.textContent = open ? '▶' : '▼';
-            });
-        });
-
-        document.getElementById('mac-ext-hud-toggle')?.addEventListener('click', () => {
-            const hud = document.getElementById('mac-hud');
-            if (hud) hud.style.display = hud.style.display === 'none' ? '' : 'none';
-        });
-
-        document.getElementById('mac-cfg-api-save')?.addEventListener('click', () => {
-            const s = cfg();
-            s.apiUrl = document.getElementById('mac-cfg-apiurl').value.trim();
-            s.apiKey = document.getElementById('mac-cfg-apikey').value.trim();
-            s.apiModel = document.getElementById('mac-cfg-model').value.trim() || 'gpt-4o-mini';
-            saveCfg(); addLog(`API设置已保存`, 'info');
-        });
-
-        document.getElementById('mac-cfg-api-test')?.addEventListener('click', async () => {
-            const url = document.getElementById('mac-cfg-apiurl').value.trim();
-            const key = document.getElementById('mac-cfg-apikey').value.trim();
-            const model = document.getElementById('mac-cfg-model').value.trim() || 'gpt-4o-mini';
-            const resEl = document.getElementById('mac-api-result');
-            if (!url) { showApiResult(resEl, '请先填写 API 地址', 'error'); return; }
-            showApiResult(resEl, '⏳ 正在测试...', 'info');
-            try {
-                const resp = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', ...(key ? { 'Authorization': `Bearer ${key}` } : {}) }, body: JSON.stringify({ model, messages: [{ role: 'user', content: 'Hi' }], max_tokens: 5 }) });
-                showApiResult(resEl, resp.ok ? '✅ 连接成功！' : `❌ ${resp.status}`, resp.ok ? 'success' : 'error');
-            } catch (e) { showApiResult(resEl, `❌ ${e.message}`, 'error'); }
-        });
-
-        document.getElementById('mac-cfg-agents-save')?.addEventListener('click', () => {
-            const s = cfg();
-            document.querySelectorAll('.mac-agent-icon').forEach((el, i) => {
-                if (!s.agents[i]) return;
-                s.agents[i].icon = el.value.trim() || '🤖';
-                s.agents[i].name = document.querySelectorAll('.mac-agent-name')[i]?.value.trim() || `角色${i + 1}`;
-                s.agents[i].role = document.querySelectorAll('.mac-agent-role')[i]?.value.trim() || '冒险者';
-                s.agents[i].prompt = document.querySelectorAll('.mac-agent-prompt')[i]?.value.trim() || '';
-                s.agents[i].id = s.agents[i].id || s.agents[i].name.toLowerCase().replace(/[^a-z0-9]/g, '_');
-                s.agents[i].maxHp = s.agents[i].maxHp || 100;
-                s.agents[i].priority = i + 1;
-            });
-            saveCfg(); addLog(`角色配置已保存`, 'info');
-        });
-
-        document.getElementById('mac-agent-add')?.addEventListener('click', () => {
-            const s = cfg();
-            s.agents.push({ id: `agent_${Date.now()}`, name: `角色${s.agents.length + 1}`, icon: '🤖', role: '冒险者', hp: 100, maxHp: 100, location: 'village', inventory: [], gold: 0, priority: s.agents.length + 1, prompt: '' });
-            saveCfg(); renderAgentList();
-        });
-
-        document.getElementById('mac-wi-refresh')?.addEventListener('click', renderWorldInfoList);
-
-        document.getElementById('mac-wi-enable')?.addEventListener('click', async () => {
-            const checked = [...document.querySelectorAll('.mac-wi-check:checked')].map(el => el.value);
-            if (!checked.length) { addLog('未选择任何 World Info 文件', 'warn'); return; }
-            const s = cfg(); s.worldInfoSelected = checked;
-            const texts = [];
-            for (const name of checked) { const t = await loadSTWorldInfoFile(name); if (t) texts.push(t); }
-            s.worldInfo = texts.join('\n---\n').substring(0, 2000);
-            saveCfg();
-            const disp = document.getElementById('mac-wi-display');
-            if (disp) disp.textContent = s.worldInfo.substring(0, 500) + (s.worldInfo.length > 500 ? '…' : '');
-            addLog(`已启用 ${checked.length} 个 World Info 文件`, 'info');
-        });
-
-        document.getElementById('mac-wi-clear')?.addEventListener('click', () => {
-            const s = cfg(); s.worldInfo = ''; s.worldInfoSelected = []; saveCfg();
-            document.querySelectorAll('.mac-wi-check').forEach(el => el.checked = false);
-            const disp = document.getElementById('mac-wi-display');
-            if (disp) disp.textContent = '暂无启用的 World Info 内容。';
-        });
-
-        document.getElementById('mac-cfg-rounds')?.addEventListener('change', function () { cfg().maxRounds = parseInt(this.value) || 10; saveCfg(); });
-        document.getElementById('mac-cfg-delay')?.addEventListener('change', function () { cfg().stepDelay = parseInt(this.value) || 1000; saveCfg(); });
-        document.getElementById('mac-cfg-maxsteps')?.addEventListener('change', function () { cfg().maxSteps = parseInt(this.value) || 5; saveCfg(); });
-        document.getElementById('mac-cfg-timeout')?.addEventListener('change', function () { cfg().llmTimeout = parseInt(this.value) || 60000; saveCfg(); });
-
-        [1, 2, 3].forEach(slot => {
-            document.getElementById(`mac-save-btn-${slot}`)?.addEventListener('click', () => saveGame(slot));
-            document.getElementById(`mac-load-btn-${slot}`)?.addEventListener('click', () => loadGame(slot));
-        });
-
-        document.getElementById('mac-cfg-prompts-save')?.addEventListener('click', () => {
-            const s = cfg();
-            const t = s.promptTemplates;
-            t.systemPrompt  = document.getElementById('mac-cfg-systemprompt')?.value || t.systemPrompt;
-            t.worldTpl      = document.getElementById('mac-cfg-worldtpl')?.value || t.worldTpl;
-            t.toolsDesc     = document.getElementById('mac-cfg-toolsdesc')?.value || t.toolsDesc;
-            t.outputFormat  = document.getElementById('mac-cfg-outputformat')?.value || t.outputFormat;
-            t.initRouteA    = document.getElementById('mac-cfg-initroutea')?.value || t.initRouteA;
-            t.initRouteB    = document.getElementById('mac-cfg-initrouteb')?.value || t.initRouteB;
-            t.initGoal      = document.getElementById('mac-cfg-initgoal')?.value || t.initGoal;
-            t.envNarrations = document.getElementById('mac-cfg-envnarrations')?.value || t.envNarrations;
-            t.goalSuccess   = document.getElementById('mac-cfg-goalsuccess')?.value || t.goalSuccess;
-            t.goalFail      = document.getElementById('mac-cfg-goalfail')?.value || t.goalFail;
-            saveCfg();
-            addLog('Prompt模板已保存', 'info');
-        });
-
-        document.getElementById('mac-cfg-prompts-reset')?.addEventListener('click', () => {
-            if (!confirm('确定恢复所有Prompt模板为默认值？')) return;
-            cfg().promptTemplates = { ...DEFAULT_PROMPT_TEMPLATES };
-            saveCfg();
-            fillPromptTemplateFields();
-            addLog('Prompt模板已恢复默认', 'info');
-        });
-
-        document.getElementById('mac-log-clear')?.addEventListener('click', () => { LOG = []; renderLog(); });
-        document.getElementById('mac-ext-init')?.addEventListener('click', doInit);
-        document.getElementById('mac-ext-start')?.addEventListener('click', doStart);
-        document.getElementById('mac-ext-pause')?.addEventListener('click', doPause);
-        document.getElementById('mac-ext-stop')?.addEventListener('click', doStop);
-    }
-
-    function fillPromptTemplateFields() {
-        const setVal = (id, key) => { const el = document.getElementById(id); if (el) el.value = pt(key); };
-        setVal('mac-cfg-systemprompt', 'systemPrompt');
-        setVal('mac-cfg-worldtpl', 'worldTpl');
-        setVal('mac-cfg-toolsdesc', 'toolsDesc');
-        setVal('mac-cfg-outputformat', 'outputFormat');
-        setVal('mac-cfg-initroutea', 'initRouteA');
-        setVal('mac-cfg-initrouteb', 'initRouteB');
-        setVal('mac-cfg-initgoal', 'initGoal');
-        setVal('mac-cfg-envnarrations', 'envNarrations');
-        setVal('mac-cfg-goalsuccess', 'goalSuccess');
-        setVal('mac-cfg-goalfail', 'goalFail');
-    }
-
-    function showApiResult(el, text, type) {
-        if (!el) return;
-        el.textContent = text;
-        el.className = 'mac-api-result mac-api-' + (type || 'info');
-        el.style.display = 'block';
-    }
-
-    function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
-    function waitResume() { return new Promise(r => { const id = setInterval(() => { if (!G.paused || !G.running) { clearInterval(id); r(); } }, 200); }); }
-
-    // ══════════════════════════════════════════════════════════
-    //  启动入口（防竞态：多次重试，兼容 APP_READY 已错过的情况）
-    // ══════════════════════════════════════════════════════════
-
-    let macInitDone = false;
-
-    function initMacPluginOnce() {
-        const hasPanel = !!document.getElementById('mac-ext-wrap');
-        const hasHud = !!document.getElementById('mac-hud');
-        if (macInitDone && hasPanel && hasHud) return;
-        if (hasPanel && hasHud) { macInitDone = true; return; }
-        try {
-            if (!hasPanel) createSettingsPanel();
-            if (!document.getElementById('mac-hud')) createHUD();
-            macInitDone = !!(document.getElementById('mac-ext-wrap') && document.getElementById('mac-hud'));
-            if (macInitDone) {
-                addLog('插件 v4.0 初始化完成（五层架构 + ReAct逐步循环）', 'info');
-                console.log('[MultiAgent v4] 初始化完成 ✓');
-            }
-        } catch (e) {
-            console.error('[MultiAgent] 初始化失败:', e);
-        }
-    }
-
-    function boot() {
-        console.log('[MultiAgent v4] 插件脚本已执行…');
-        try {
-            const ctx = typeof SillyTavern !== 'undefined' && SillyTavern.getContext ? SillyTavern.getContext() : null;
-            if (ctx && ctx.eventSource) {
-                const et = ctx.event_types || {};
-                const initSoon = () => setTimeout(initMacPluginOnce, 0);
-                ctx.eventSource.on(et.APP_READY || 'app_ready', initSoon);
-                if (et.APP_INITIALIZED) ctx.eventSource.on(et.APP_INITIALIZED, initSoon);
-                if (et.EXTENSION_SETTINGS_LOADED) ctx.eventSource.on(et.EXTENSION_SETTINGS_LOADED, initSoon);
-            }
-        } catch (e) { console.error('[MultiAgent] 注册事件失败:', e); }
-        setTimeout(initMacPluginOnce, 0);
-        setTimeout(initMacPluginOnce, 300);
-        setTimeout(initMacPluginOnce, 1200);
-        setTimeout(initMacPluginOnce, 3000);
-    }
-
+    function showApi(el,text,type){if(!el)return;el.textContent=text;el.className=`mac-apir mac-apir-${type}`;el.style.display='block';}
+
+    // ══════════════════════════════════════════════════════════════
+    //  PART 9 — 启动
+    // ══════════════════════════════════════════════════════════════
+    let initDone=false;
+    function injectTopBar(){if(document.getElementById('mac-topbar-btn'))return true;const sels=['#top-settings-holder','#topBar','#top-bar','.drag-grabber'];let c=null;for(const s of sels){c=document.querySelector(s);if(c)break;}if(!c)return false;const b=document.createElement('div');b.id='mac-topbar-btn';b.title='多智能体协作系统';b.innerHTML=IC.logo;b.addEventListener('click',toggleApp);c.appendChild(b);return true;}
+    function initOnce(){if(initDone)return;try{if(!document.getElementById('mac-app'))createFullScreenApp();if(!document.getElementById('mac-hud'))createHUD();injectTopBar();initDone=true;addLog(`v${VERSION} 初始化完成`);console.log(`[MultiAgent v${VERSION}] ✓`);}catch(e){console.error('[MultiAgent]',e);}}
+    function boot(){console.log(`[MultiAgent v${VERSION}] loading…`);try{const ctx=typeof SillyTavern!=='undefined'&&SillyTavern.getContext?SillyTavern.getContext():null;if(ctx?.eventSource){const et=ctx.event_types||{};const go=()=>setTimeout(initOnce,0);ctx.eventSource.on(et.APP_READY||'app_ready',go);if(et.APP_INITIALIZED)ctx.eventSource.on(et.APP_INITIALIZED,go);if(et.EXTENSION_SETTINGS_LOADED)ctx.eventSource.on(et.EXTENSION_SETTINGS_LOADED,go);}}catch(e){console.error('[MultiAgent] events:',e);}setTimeout(initOnce,0);setTimeout(initOnce,300);setTimeout(initOnce,1200);setTimeout(initOnce,3000);}
     boot();
 })();
