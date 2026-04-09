@@ -6,7 +6,7 @@
     "js": "index.js",
     "css": "style.css",
     "author": "f22016405 胡适麒",
-    "version": "5.2.0",
+    "version": "5.3.0",
     "homePage": "https://github.com/summerpromise/multi-agent-collab",
     "auto_update": false,
     "minimum_client_version": "1.0.0"
